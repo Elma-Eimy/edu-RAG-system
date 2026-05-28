@@ -1,0 +1,53 @@
+# 🎓 智能教育系统统一配置文件（非敏感系统级参数与行为常量）
+# 注：敏感信息（如 API Key, 数据库密码，JWT Secret 等）均安全地保留在本地 .env 文件中
+
+app:
+  project_name: "Smart Education System API"
+  api_v1_str: "/api/v1"
+  access_token_expire_minutes: 11520 # Token 有效期（8天）
+
+database:
+  mysql:
+    user: "root"
+    host: "localhost"
+    port: 3306
+    db: "edu_system"
+  redis:
+    url: "redis://localhost:6379/0"
+
+storage:
+  upload_dir: "./uploads/textbooks"
+  max_upload_mb: 50
+  file_buffer_chunk_bytes: 1048576 # 异步文件写入每次缓冲大小（1MB）
+
+celery:
+  embedding_batch_size: 50 # 离线任务 Embedding 批处理大小
+  process_textbook:
+    max_retries: 3
+    retry_delay: 60 # 重新解析延迟时间（秒）
+  summarize_chat:
+    max_retries: 2
+    retry_delay: 30 # 摘要提炼失败延迟时间（秒）
+
+llm:
+  openai:
+    base_url: "https://api.deepseek.com/v1"
+    model_name: "deepseek-v4-pro"
+  embedding:
+    base_url: "https://ark.cn-beijing.volces.com/api/v3"
+    model_name: "doubao-embedding-vision-251215"
+
+rag:
+  chromadb_path: "./chroma_db"
+  textbook_chunk_size: 200 # 语义切块上限（字符数）
+  history_window_rounds: 5 # 对话轮数携带量（N轮 = N*2 条消息）
+  top_k: 4 # 最终提供给大模型的增强上下文片段数
+  system_prompt: "你是一名专业的 AI 教学助手，正在辅导学生学习教材内容。请根据【参考资料】中的原文内容，结合学生的问题进行精准解答。若参考资料中没有相关内容，请如实告知学生，不要编造答案。回答时请使用 Markdown 格式，结构清晰。"
+  enable_history_summary: false # 是否开启消息压缩历史摘要
+  history_summary_threshold: 20 # 触发摘要压缩消息数阈值
+
+rerank:
+  mode: "llm" # 重排模式，可选 "none"、"cohere"、"llm"
+  candidates_limit: 12 # 重排候选池大小
+  rrf_k: 60 # RRF 排名常数系数
+  sse_heartbeat_seconds: 8.0 # SSE 连接无数据自动维持心跳秒数
