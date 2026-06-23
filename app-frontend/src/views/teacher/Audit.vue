@@ -93,7 +93,7 @@
               <!-- Bubble Content -->
               <div class="message-bubble">
                 <div class="bubble-content">
-                  {{ msg.content }}
+                  <div v-html="renderMarkdown(msg.content)"></div>
                 </div>
                 <span class="message-time">{{ formatTime(msg.created_at) }}</span>
               </div>
@@ -115,6 +115,7 @@
 <script setup>
 import { ref, onMounted, computed, nextTick } from 'vue'
 import { api } from '../../utils/api'
+import { renderMarkdown } from '../../utils/markdown'
 
 // Audit states
 const sessions = ref([])
@@ -125,73 +126,7 @@ const selectedClassId = ref('')
 const loading = ref(false)
 const viewport = ref(null)
 
-// Mock Fallback Database
-const mockClasses = [
-  { id: 1, name: '高等数学 A 班' },
-  { id: 2, name: '线性代数 B 班' }
-]
-
-const mockAuditSessions = [
-  {
-    id: 12,
-    title: '向量空间的定义是什么',
-    student_id: 10,
-    student_name: '李四',
-    textbook_id: 3,
-    textbook_title: '高等数学上册',
-    class_id: 1,
-    class_name: '高等数学 A 班',
-    summary: '学生询问了向量空间的基本定义以及八条公理。AI 准确给出了定义与最常见的三维欧氏空间例子，并对加法结合律和数乘进行了深入浅出的解析。学情评估为：学生掌握良好，已进入下阶段空间性质学习。',
-    summary_updated_at: new Date(Date.now() - 3300000).toISOString(),
-    created_at: new Date(Date.now() - 3600000).toISOString()
-  },
-  {
-    id: 13,
-    title: '矩阵的逆怎么求解',
-    student_id: 12,
-    student_name: '赵六',
-    textbook_id: 4,
-    textbook_title: '线性代数与空间解析几何',
-    class_id: 2,
-    class_name: '线性代数 B 班',
-    summary: '学生提问了求解逆矩阵的具体算法。AI 给出了伴随矩阵法以及初等行变换（高斯-约旦消元法）两种主流算法。学生在初等行变换操作上存在部分关于行相加减的计算疑虑，已获得 AI 的细化步骤纠正。学情评估：学生处于方法掌握期，仍需配合习题加强计算熟练度。',
-    summary_updated_at: new Date(Date.now() - 1700000).toISOString(),
-    created_at: new Date(Date.now() - 1800000).toISOString()
-  }
-]
-
-const mockAuditMessages = {
-  12: [
-    {
-      id: 301,
-      sender: 'user',
-      content: '向量空间的定义是什么？想请教一下具体需要满足哪些代数关系。',
-      created_at: new Date(Date.now() - 3550000).toISOString()
-    },
-    {
-      id: 302,
-      sender: 'ai',
-      content: '向量空间（线性空间）是一个集合，其元素称为“向量”。为了构成向量空间，该集合必须定义“向量加法”和“标量乘法”两种运算，并满足八条基本代数公理，例如加法交换律、结合律、存在零向量、存在逆向量，以及标量乘法的分配律等。最常见的例子就是我们熟悉的三维欧氏空间 R³。',
-      created_at: new Date(Date.now() - 3495000).toISOString()
-    }
-  ],
-  13: [
-    {
-      id: 401,
-      sender: 'user',
-      content: '请问矩阵的逆要怎么求？我只知道伴随矩阵法，但是计算量有点大。',
-      created_at: new Date(Date.now() - 1750000).toISOString()
-    },
-    {
-      id: 402,
-      sender: 'ai',
-      content: '确实，当矩阵阶数大于3时，伴随矩阵法的计算量呈指数增长。此时最推荐的方法是【初等行变换法】（也称高斯-约旦消元法）。具体步骤如下：1. 将原矩阵A与同阶单位矩阵I横向拼接，构成增广矩阵 [A | I]；2. 通过初等行变换将左侧的A化为单位矩阵I；3. 此时右侧部分所转化出的矩阵就是原矩阵的逆 A⁻¹。该方法在计算机算法中极为通用。',
-      created_at: new Date(Date.now() - 1690000).toISOString()
-    }
-  ]
-}
-
-const classes = ref([...mockClasses])
+const classes = ref([])
 
 // Filtered list
 const filteredSessions = computed(() => {
@@ -210,15 +145,30 @@ const fetchAuditSessions = async () => {
     const res = await api.get('/chat/teacher/student-chats')
     sessions.value = res
   } catch (error) {
-    console.warn('Backend API connection offline, falling back to mock student chats audit records.')
-    sessions.value = [...mockAuditSessions]
+    console.error('Failed to fetch student chats:', error)
+    sessions.value = []
   } finally {
     loading.value = false
   }
 }
 
+// Fetch teacher classes for sidebar filtering
+const fetchTeacherClasses = async () => {
+  try {
+    const res = await api.get('/classes/dashboard')
+    classes.value = (res.classes || []).map(c => ({
+      id: c.id,
+      name: c.name
+    }))
+  } catch (error) {
+    console.error('Failed to load teacher classes for audit:', error)
+    classes.value = []
+  }
+}
+
 onMounted(() => {
   fetchAuditSessions()
+  fetchTeacherClasses()
 })
 
 const selectSession = async (id) => {
@@ -228,7 +178,8 @@ const selectSession = async (id) => {
     const res = await api.get(`/chat/teacher/student-chats/${id}/messages`)
     messages.value = res
   } catch (error) {
-    messages.value = mockAuditMessages[id] || []
+    alert(error.message || '获取审计对话消息失败。')
+    messages.value = []
   }
   
   scrollToBottom()
@@ -539,6 +490,7 @@ const scrollToBottom = () => {
   line-height: 1.5;
   word-break: break-word;
   box-shadow: var(--shadow-sm);
+  white-space: pre-wrap;
 }
 
 .user .bubble-content {

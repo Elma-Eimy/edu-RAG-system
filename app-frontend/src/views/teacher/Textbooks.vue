@@ -157,6 +157,9 @@
         <div class="card-actions">
           <!-- If success: allow binding and soft deleting -->
           <template v-if="tb.status === 'success'">
+            <button class="btn btn-primary action-btn" @click="openTestDrawer(tb)">
+              <i class="ph ph-chat-circle"></i> 测试教材
+            </button>
             <button class="btn btn-secondary action-btn" @click="openBindModal(tb)">
               <i class="ph ph-link-simple"></i> 授权绑定班级
             </button>
@@ -264,18 +267,31 @@
         </div>
       </div>
     </transition>
+
+    <!-- Chat Test Sandbox Drawer (Decoupled Component) -->
+    <ChatSandboxDrawer 
+      :show="showTestDrawer" 
+      :textbook="selectedBookForTest" 
+      @close="closeTestDrawer" 
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, computed, onUnmounted } from 'vue'
+import { ref, onMounted, computed, onUnmounted, nextTick } from 'vue'
 import { api } from '../../utils/api'
+import { renderMarkdown } from '../../utils/markdown'
+import ChatSandboxDrawer from '../../components/ChatSandboxDrawer.vue'
 
 // Textbooks State
 const textbooks = ref([])
 const showUploadPanel = ref(false)
 const showBindModal = ref(false)
 const showConfirmDelete = ref(false)
+
+// Test Drawer State
+const showTestDrawer = ref(false)
+const selectedBookForTest = ref(null)
 
 // Upload Form state
 const uploadTitle = ref('')
@@ -291,42 +307,7 @@ const bookToDelete = ref(null)
 
 const globalMessage = ref(null)
 
-// Default Mock Data for local workspace demonstration
-const mockTextbooks = [
-  {
-    id: 3,
-    title: '高等数学上册',
-    status: 'success',
-    processing_progress: 100,
-    chroma_collection_id: 'textbook_vec_3',
-    created_at: new Date(Date.now() - 86400000).toISOString(),
-    boundClasses: [1, 3]
-  },
-  {
-    id: 4,
-    title: '大学物理中册',
-    status: 'processing',
-    processing_progress: 45,
-    chroma_collection_id: null,
-    created_at: new Date(Date.now() - 600000).toISOString(),
-    boundClasses: []
-  },
-  {
-    id: 5,
-    title: '概率论与数理统计',
-    status: 'failed',
-    processing_progress: 12,
-    chroma_collection_id: null,
-    created_at: new Date(Date.now() - 1800000).toISOString(),
-    boundClasses: []
-  }
-]
-
-const teacherClasses = ref([
-  { id: 1, name: '高等数学 A 班', class_code: 'AB12CD' },
-  { id: 2, name: '线性代数 B 班', class_code: 'XY99ZZ' },
-  { id: 3, name: '考研高等数学提高班', class_code: 'KY88HH' }
-])
+const teacherClasses = ref([])
 
 // Computed classes
 const alertClass = computed(() => {
@@ -348,21 +329,36 @@ const fetchTextbooks = async () => {
     }))
     startPollingIfNecessary()
   } catch (error) {
-    console.warn('Backend API connection offline, falling back to mock textbooks catalog.')
-    textbooks.value = [...mockTextbooks]
-    startPollingIfNecessary()
+    showErrorToast(error.message || '获取教材列表失败。')
+    textbooks.value = []
+  }
+}
+
+// Fetch teacher classes for binding modal
+const fetchTeacherClasses = async () => {
+  try {
+    const res = await api.get('/classes/dashboard')
+    teacherClasses.value = (res.classes || []).map(c => ({
+      id: c.id,
+      name: c.name,
+      class_code: c.class_code
+    }))
+  } catch (error) {
+    console.error('Failed to fetch teacher classes:', error)
+    teacherClasses.value = []
   }
 }
 
 onMounted(() => {
   fetchTextbooks()
+  fetchTeacherClasses()
 })
 
 onUnmounted(() => {
   clearInterval(pollIntervalTimer)
 })
 
-// Dynamic Mock polling trigger to showcase horizontal capsule progress bar updates!
+// Dynamic polling trigger to showcase progress bar updates
 const startPollingIfNecessary = () => {
   clearInterval(pollIntervalTimer)
   pollIntervalTimer = setInterval(() => {
@@ -379,18 +375,7 @@ const startPollingIfNecessary = () => {
           tb.processing_progress = res.processing_progress
           tb.chroma_collection_id = res.chroma_collection_id
         } catch (err) {
-          // Sandbox mock loop increments progress beautifully
-          if (tb.status === 'pending') {
-            tb.status = 'processing'
-            tb.processing_progress = 0
-          } else {
-            tb.processing_progress = Math.min(100, tb.processing_progress + 15)
-            if (tb.processing_progress === 100) {
-              tb.status = 'success'
-              tb.chroma_collection_id = `textbook_vec_${tb.id}`
-              showSuccessToast(`教材 “${tb.title}” 向量分块解析成功！已在数据库就绪。`)
-            }
-          }
+          console.error('Failed to poll textbook status:', err)
         }
       }
     })
@@ -504,20 +489,7 @@ const handleUpload = async () => {
     showSuccessToast('教材上传成功，已排队入库启动异步向量分块！')
     startPollingIfNecessary()
   } catch (error) {
-    // Sandboxed mock fallback addition
-    const mockNew = {
-      id: Math.floor(Math.random() * 1000) + 100,
-      title: uploadTitle.value.trim(),
-      status: 'pending',
-      processing_progress: 0,
-      chroma_collection_id: null,
-      created_at: new Date().toISOString(),
-      boundClasses: []
-    }
-    textbooks.value.unshift(mockNew)
-    cancelUpload()
-    showSuccessToast('教材上传成功（模拟沙盒拦截模式，正在启动动态分块进度）！')
-    startPollingIfNecessary()
+    showErrorToast(error.message || '上传电子教材失败，请重试。')
   } finally {
     uploadLoading.value = false
   }
@@ -531,10 +503,7 @@ const handleReprocess = async (tb) => {
     showSuccessToast(res.message || '重试任务提交通道成功！')
     startPollingIfNecessary()
   } catch (err) {
-    tb.status = 'pending'
-    tb.processing_progress = 0
-    showSuccessToast('重试任务提交成功（模拟沙盒拦截模式）！')
-    startPollingIfNecessary()
+    showErrorToast(err.message || '重新提交解析失败。')
   }
 }
 
@@ -560,9 +529,7 @@ const handleBindClasses = async () => {
     selectedBook.value.boundClasses = [...tempClassIds.value]
     showSuccessToast('授权绑定成功！')
   } catch (error) {
-    // Mock update
-    selectedBook.value.boundClasses = [...tempClassIds.value]
-    showSuccessToast('授权关系保存成功（模拟沙盒拦截模式）！')
+    showErrorToast(error.message || '授权绑定失败。')
   } finally {
     closeBindModal()
   }
@@ -588,8 +555,7 @@ const handleDeleteBook = async () => {
     textbooks.value = textbooks.value.filter(t => t.id !== id)
     showSuccessToast('教材已成功软下架。')
   } catch (error) {
-    textbooks.value = textbooks.value.filter(t => t.id !== id)
-    showSuccessToast('教材已成功下架并从 ChromaDB 擦除（模拟沙盒拦截模式）。')
+    showErrorToast(error.message || '下架教材失败，请稍后重试。')
   } finally {
     closeConfirmDelete()
   }
@@ -618,6 +584,20 @@ const showErrorToast = (text) => {
   setTimeout(() => {
     globalMessage.value = null
   }, 4000)
+}
+
+// --- Test Drawer Methods ---
+
+// Open test drawer
+const openTestDrawer = (tb) => {
+  selectedBookForTest.value = tb
+  showTestDrawer.value = true
+}
+
+// Close test drawer
+const closeTestDrawer = () => {
+  showTestDrawer.value = false
+  selectedBookForTest.value = null
 }
 </script>
 
@@ -1291,4 +1271,5 @@ const showErrorToast = (text) => {
   transform: translateY(-10px);
   opacity: 0;
 }
+
 </style>
