@@ -33,5 +33,7 @@ class Message(Base, SoftDeleteMixin):
     session_id: Mapped[int] = mapped_column(ForeignKey("chat_sessions.id"))
     sender: Mapped[SenderRole] = mapped_column(Enum(SenderRole))
     content: Mapped[str] = mapped_column(Text)
+    # 新增：保存大模型思考/推理过程的字段，允许为空（非思考模式或普通消息无此内容）
+    reasoning_content: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     session = relationship("ChatSession", back_populates="messages")
