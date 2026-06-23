@@ -114,8 +114,8 @@ class CRUDStudentClass(CRUDBase[StudentClass, Any, Any]):
         )
         existing = result.scalars().first()
         if existing:
-            if existing.deleted_at is not None:
-                # 曾经被软删除（退出/被踢），复用并重置为待审批状态
+            if existing.deleted_at is not None or existing.status == StudentClassStatus.REJECTED:
+                # 曾经被软删除（退出/被踢）或被拒绝，复用并重置为待审批状态
                 existing.deleted_at = None
                 existing.status = StudentClassStatus.PENDING
                 db.add(existing)
