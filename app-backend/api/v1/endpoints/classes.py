@@ -515,7 +515,9 @@ async def disband_class(
         StudentClass.deleted_at.is_(None)
     )
     sc_result = await db.execute(sc_query)
-    for sc in sc_result.scalars().all():
+    sc_list = sc_result.scalars().all()
+    student_ids = [sc.student_id for sc in sc_list]
+    for sc in sc_list:
         await crud_student_class.remove(db, id=sc.id)
         
     # 2. 软删除教材与班级关联，并记录受影响的教材 ID（后续清理 ChatSession 需要）
@@ -529,10 +531,11 @@ async def disband_class(
     for ct in ct_list:
         await crud_class_textbook.remove(db, id=ct.id)
 
-    # 3. 软删除学生在该班级教材下的 ChatSession，防止列表中出现失效会话
-    if affected_textbook_ids:
+    # 3. 软删除该班级下学生在该教材下的 ChatSession，防止列表中出现失效会话
+    if affected_textbook_ids and student_ids:
         sessions_query = select(ChatSession).where(
             ChatSession.textbook_id.in_(affected_textbook_ids),
+            ChatSession.student_id.in_(student_ids),
             ChatSession.deleted_at.is_(None),
         )
         sessions_result = await db.execute(sessions_query)
@@ -541,8 +544,8 @@ async def disband_class(
             db.add(sess)
         await db.commit()
         logger.info(
-            "Soft-deleted chat sessions for disbanded class %d (textbooks: %s)",
-            course_class.id, affected_textbook_ids,
+            "Soft-deleted chat sessions of disbanded class %d for students %s (textbooks: %s)",
+            course_class.id, student_ids, affected_textbook_ids,
         )
 
     # 4. 软删除班级主记录

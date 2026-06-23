@@ -17,12 +17,13 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
 from core.config import settings
-from core.dependencies import get_current_teacher, get_db
+from core.dependencies import get_current_teacher, get_current_user, get_db
 from db.models.course_class import CourseClass
-from db.models.relations import ClassTextbook
+from db.models.relations import ClassTextbook, StudentClass, StudentClassStatus
 from db.models.textbook import Textbook, TextbookStatus
-from db.models.user import User
+from db.models.user import User, UserRole
 from services.file_storage import FileStorageService
 from crud import crud_textbook, crud_class, crud_class_textbook
 
@@ -42,6 +43,7 @@ class TextbookBriefResponse(BaseModel):
     chroma_collection_id: str | None
     file_path: str
     created_at: str
+    boundClasses: List[int] = []
 
     class Config:
         from_attributes = True
@@ -159,7 +161,8 @@ async def upload_textbook(
     # ── 失效教材列表缓存 ────────────────────────────────────────────────────────
     try:
         from core.redis import redis_client
-        await redis_client.delete(f"cache:textbooks:list:{current_user.id}")
+        await redis_client.delete(f"cache:textbooks:list:teacher:{current_user.id}")
+        await redis_client.delete(f"cache:textbooks:list:admin:{current_user.id}")
     except Exception:
         pass
 
@@ -191,18 +194,22 @@ async def upload_textbook(
 @router.get(
     "/",
     response_model=List[TextbookBriefResponse],
-    summary="教师查看自己的教材列表",
+    summary="获取教材列表",
 )
 async def list_textbooks(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_teacher),
+    current_user: User = Depends(get_current_user),
 ):
-    """按创建时间倒序返回当前教师名下所有未删除的教材。"""
+    """
+    获取教材列表。
+    - 教师/管理员：按创建时间倒序返回自己名下所有未删除的教材。
+    - 学生：返回其已加入且审批通过（APPROVED）的班级所绑定的教材。
+    """
     from core.redis import redis_client
     import json
     
     # ── 1. 尝试从 Redis 缓存中获取 ─────────────────────────────────────────────
-    cache_key = f"cache:textbooks:list:{current_user.id}"
+    cache_key = f"cache:textbooks:list:{current_user.role.value}:{current_user.id}"
     try:
         cached_data = await redis_client.get(cache_key)
         if cached_data:
@@ -211,7 +218,48 @@ async def list_textbooks(
         logger.warning("Failed to read textbooks list cache: %s", e)
 
     # ── 2. 缓存未击中，查询数据库并构造成员 ───────────────────────────────────────
-    textbooks = await crud_textbook.get_multi_by_teacher(db, teacher_id=current_user.id)
+    from sqlalchemy.orm import selectinload
+    if current_user.role == UserRole.STUDENT:
+        # 学生查询绑定教材
+        query = (
+            select(Textbook)
+            .join(ClassTextbook, ClassTextbook.textbook_id == Textbook.id)
+            .join(StudentClass, StudentClass.class_id == ClassTextbook.class_id)
+            .join(CourseClass, CourseClass.id == ClassTextbook.class_id)
+            .where(
+                Textbook.status == TextbookStatus.SUCCESS,
+                Textbook.deleted_at.is_(None),
+                StudentClass.student_id == current_user.id,
+                StudentClass.status == StudentClassStatus.APPROVED,
+                StudentClass.deleted_at.is_(None),
+                ClassTextbook.deleted_at.is_(None),
+                CourseClass.deleted_at.is_(None),
+            )
+            .options(selectinload(Textbook.class_links))
+            .order_by(Textbook.created_at.desc())
+        )
+        result = await db.execute(query)
+        textbooks_raw = result.scalars().all()
+        # 去重
+        seen = set()
+        textbooks = []
+        for t in textbooks_raw:
+            if t.id not in seen:
+                seen.add(t.id)
+                textbooks.append(t)
+    else:
+        # 教师/管理员查询自己拥有的教材
+        query = (
+            select(Textbook)
+            .where(
+                Textbook.teacher_id == current_user.id,
+                Textbook.deleted_at.is_(None)
+            )
+            .options(selectinload(Textbook.class_links))
+            .order_by(Textbook.created_at.desc())
+        )
+        result = await db.execute(query)
+        textbooks = list(result.scalars().all())
 
     response_list = [
         TextbookBriefResponse(
@@ -222,6 +270,7 @@ async def list_textbooks(
             chroma_collection_id=t.chroma_collection_id,
             file_path=t.file_path,
             created_at=t.created_at.isoformat(),
+            boundClasses=[link.class_id for link in t.class_links if link.deleted_at is None],
         )
         for t in textbooks
     ]
@@ -295,46 +344,68 @@ async def bind_classes(
             detail=f"教材尚未解析完成（当前状态：{textbook.status.value}），无法绑定班级",
         )
 
-    if not body.class_ids:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="class_ids 不能为空",
-        )
-
     # 只取属于当前教师的班级（防止越权）
-    classes = await crud_class.get_multi_by_ids_and_teacher(
-        db, class_ids=body.class_ids, teacher_id=current_user.id
+    teacher_classes = await crud_class.get_multi_by_teacher(db, teacher_id=current_user.id)
+    teacher_class_ids = {c.id for c in teacher_classes}
+    valid_class_ids = {cid for cid in body.class_ids if cid in teacher_class_ids}
+
+    # 查出当前教材的所有已存在绑定（不限班级）
+    result = await db.execute(
+        select(ClassTextbook).where(
+            ClassTextbook.textbook_id == textbook_id,
+            ClassTextbook.deleted_at.is_(None)
+        )
     )
-    valid_class_ids = {cls.id for cls in classes}
+    all_current_bindings = list(result.scalars().all())
+    currently_bound_ids = {b.class_id for b in all_current_bindings}
 
-    # 查出已存在的绑定（幂等检查）
-    existing_bindings = await crud_class_textbook.get_multi_by_textbook_and_classes(
-        db, textbook_id=textbook_id, class_ids=list(valid_class_ids)
-    )
-    already_bound = {b.class_id for b in existing_bindings}
+    # 找出本次需要解绑的关联
+    bindings_to_remove = [
+        b for b in all_current_bindings 
+        if b.class_id in teacher_class_ids and b.class_id not in valid_class_ids
+    ]
+    # 找出本次需要新增绑定的班级
+    to_bind = valid_class_ids - currently_bound_ids
 
-    # 细化分拆：越权或不存在的班级数 / 已绑定数 / 本次新增绑定数
-    invalid_count = len(body.class_ids) - len(valid_class_ids)
-    already_bound_count = len(already_bound)
-    to_bind = valid_class_ids - already_bound
-    skipped_count = invalid_count + already_bound_count
-
+    # 批量添加
     for class_id in to_bind:
         await crud_class_textbook.create_or_restore(db, class_id=class_id, textbook_id=textbook_id)
+    
+    # 批量解绑
+    for binding in bindings_to_remove:
+        await crud_class_textbook.remove(db, id=binding.id)
 
     # ── 绑定关系发生改变，必须失效教师主看板数据缓存 ────────────────────────────────
     try:
         from core.redis import redis_client
         await redis_client.delete(f"cache:teacher_dashboard:{current_user.id}")
-    except Exception:
-        pass
+        
+        # 同时失效关联班级内所有学生的教材列表缓存
+        changed_class_ids = to_bind.union({b.class_id for b in bindings_to_remove})
+        if changed_class_ids:
+            student_query = select(StudentClass.student_id).where(
+                StudentClass.class_id.in_(changed_class_ids),
+                StudentClass.status == StudentClassStatus.APPROVED,
+                StudentClass.deleted_at.is_(None)
+            )
+            student_result = await db.execute(student_query)
+            student_ids = student_result.scalars().all()
+            for sid in student_ids:
+                await redis_client.delete(f"cache:textbooks:list:student:{sid}")
+    except Exception as e:
+        logger.warning("Failed to invalidate student caches in bind_classes: %s", e)
+
+    # 兼容原响应结构格式
+    invalid_count = len(body.class_ids) - len(valid_class_ids)
+    already_bound_count = len(valid_class_ids & currently_bound_ids)
+    skipped_count = invalid_count + already_bound_count
 
     return BindClassesResponse(
         bound_count=len(to_bind),
         skipped_count=skipped_count,
         already_bound_count=already_bound_count,
         invalid_count=invalid_count,
-        message="绑定成功" if to_bind else "所有班级均已绑定，无需重复操作",
+        message="授权关系保存成功",
     )
 
 
@@ -357,10 +428,10 @@ async def reprocess_textbook(
     """
     textbook = await _get_owned_textbook(textbook_id, current_user, db)
 
-    if textbook.status != TextbookStatus.FAILED:
+    if textbook.status == TextbookStatus.SUCCESS:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"只有 failed 状态的教材才可重新解析（当前状态：{textbook.status.value}）",
+            detail="解析成功的教材无需重新解析",
         )
 
     # ── 先校验原始文件是否存在，再修改状态（避免文件缺失时状态被破坏卡死在 PENDING）
@@ -383,7 +454,8 @@ async def reprocess_textbook(
     # ── 重新投递解析，失效列表缓存，使其呈现 pending ────────────────────────────
     try:
         from core.redis import redis_client
-        await redis_client.delete(f"cache:textbooks:list:{current_user.id}")
+        await redis_client.delete(f"cache:textbooks:list:teacher:{current_user.id}")
+        await redis_client.delete(f"cache:textbooks:list:admin:{current_user.id}")
     except Exception:
         pass
 
@@ -446,13 +518,24 @@ async def unbind_classes(
         await crud_class_textbook.remove(db, id=binding.id)
         unbound_count += 1
 
-    # ── 解绑教材，失效教师看板数据缓存 ──────────────────────────────────────────
+    # ── 解绑教材，失效教师看板数据缓存与学生教材列表缓存 ──────────────────────────
     if unbound_count > 0:
         try:
             from core.redis import redis_client
             await redis_client.delete(f"cache:teacher_dashboard:{current_user.id}")
-        except Exception:
-            pass
+            
+            # 失效关联班级内所有学生的教材列表缓存
+            student_query = select(StudentClass.student_id).where(
+                StudentClass.class_id.in_(valid_class_ids),
+                StudentClass.status == StudentClassStatus.APPROVED,
+                StudentClass.deleted_at.is_(None)
+            )
+            student_result = await db.execute(student_query)
+            student_ids = student_result.scalars().all()
+            for sid in student_ids:
+                await redis_client.delete(f"cache:textbooks:list:student:{sid}")
+        except Exception as e:
+            logger.warning("Failed to invalidate student caches in unbind_classes: %s", e)
 
     return {
         "message": "解绑成功" if unbound_count > 0 else "没有找到有效的绑定记录",
@@ -490,8 +573,26 @@ async def delete_textbook(
         ClassTextbook.deleted_at.is_(None)
     )
     bindings_result = await db.execute(bindings_query)
-    for binding in bindings_result.scalars().all():
+    bindings = bindings_result.scalars().all()
+    class_ids = {b.class_id for b in bindings}
+    for binding in bindings:
         await crud_class_textbook.remove(db, id=binding.id)
+        
+    # 失效关联班级内所有学生的教材列表缓存
+    if class_ids:
+        try:
+            from core.redis import redis_client
+            student_query = select(StudentClass.student_id).where(
+                StudentClass.class_id.in_(class_ids),
+                StudentClass.status == StudentClassStatus.APPROVED,
+                StudentClass.deleted_at.is_(None)
+            )
+            student_result = await db.execute(student_query)
+            student_ids = student_result.scalars().all()
+            for sid in student_ids:
+                await redis_client.delete(f"cache:textbooks:list:student:{sid}")
+        except Exception as e:
+            logger.warning("Failed to invalidate student caches in delete_textbook: %s", e)
 
     # ── 软删除该教材下所有学生的 ChatSession（防止学生列表出现僵尸会话）──────────
     sessions_query = select(ChatSession).where(
@@ -531,7 +632,8 @@ async def delete_textbook(
     # ── 彻底下架，失效教材列表缓存与看板数据缓存 ────────────────────────────────────
     try:
         from core.redis import redis_client
-        await redis_client.delete(f"cache:textbooks:list:{current_user.id}")
+        await redis_client.delete(f"cache:textbooks:list:teacher:{current_user.id}")
+        await redis_client.delete(f"cache:textbooks:list:admin:{current_user.id}")
         await redis_client.delete(f"cache:teacher_dashboard:{current_user.id}")
     except Exception:
         pass

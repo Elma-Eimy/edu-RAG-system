@@ -8,7 +8,7 @@ from core.config import settings, save_config_overrides
 from db.models.user import User, UserRole, UserStatus
 from db.models.textbook import Textbook
 from db.models.chat import ChatSession
-from crud import crud_user, crud_textbook, crud_chat_session
+from crud import crud_user, crud_textbook, crud_chat_session, crud_message
 
 # 路由器不再使用 router 级统一鉴权，改为每个接口函数按需注入 get_current_admin，避免双重 DB 查询
 router = APIRouter()
@@ -46,6 +46,28 @@ class NotificationCreateRequest(BaseModel):
 class NotificationBroadcastRequest(BaseModel):
     title: str = Field(..., max_length=200)
     content: str
+
+class AdminTextbookResponse(BaseModel):
+    id: int
+    title: str
+    status: str
+    teacher_name: Optional[str] = None
+    created_at: str
+
+class AdminChatSessionResponse(BaseModel):
+    id: int
+    title: str
+    student_name: str
+    textbook_title: str
+    summary: Optional[str] = None
+    created_at: str
+
+class AdminMessageResponse(BaseModel):
+    id: int
+    sender: str
+    content: str
+    reasoning_content: Optional[str] = None
+    created_at: str
 
 # 接口端点
 @router.get("/users", response_model=List[UserResponse], summary="管理员获取用户列表")
@@ -154,7 +176,7 @@ async def delete_textbook(
     
     # ── 清理关联的班级绑定（软删除中间关系记录） ───────────────────────
     from sqlalchemy import select
-    from db.models.relations import ClassTextbook
+    from db.models.relations import ClassTextbook, StudentClass, StudentClassStatus
     from db.models.chat import ChatSession
     from crud import crud_class_textbook
     bindings_query = select(ClassTextbook).where(
@@ -162,8 +184,27 @@ async def delete_textbook(
         ClassTextbook.deleted_at.is_(None)
     )
     bindings_result = await db.execute(bindings_query)
-    for binding in bindings_result.scalars().all():
+    bindings = bindings_result.scalars().all()
+    class_ids = {b.class_id for b in bindings}
+    for binding in bindings:
         await crud_class_textbook.remove(db, id=binding.id)
+        
+    # 失效关联班级内所有学生的教材列表缓存
+    if class_ids:
+        try:
+            from core.redis import redis_client
+            student_query = select(StudentClass.student_id).where(
+                StudentClass.class_id.in_(class_ids),
+                StudentClass.status == StudentClassStatus.APPROVED,
+                StudentClass.deleted_at.is_(None)
+            )
+            student_result = await db.execute(student_query)
+            student_ids = student_result.scalars().all()
+            for sid in student_ids:
+                await redis_client.delete(f"cache:textbooks:list:student:{sid}")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Failed to invalidate student caches in admin delete_textbook: %s", e)
 
     # ── 软删除该教材下所有学生的 ChatSession（防止学生列表出现僵尸会话）─────
     sessions_query = select(ChatSession).where(
@@ -183,7 +224,8 @@ async def delete_textbook(
     if teacher_id:
         try:
             from core.redis import redis_client
-            await redis_client.delete(f"cache:textbooks:list:{teacher_id}")
+            await redis_client.delete(f"cache:textbooks:list:teacher:{teacher_id}")
+            await redis_client.delete(f"cache:textbooks:list:admin:{teacher_id}")
             await redis_client.delete(f"cache:teacher_dashboard:{teacher_id}")
         except Exception:
             pass
@@ -327,3 +369,113 @@ async def broadcast_notification(
         
     await db.commit()
     return {"message": f"广播发送成功，共发送给 {count} 名用户"}
+
+@router.get("/textbooks", response_model=List[AdminTextbookResponse], summary="管理员获取所有教材列表")
+async def list_all_textbooks(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_admin),
+    skip: int = 0,
+    limit: int = 100,
+):
+    """
+    管理员获取系统内所有教材（已排除了已软删除的）。
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    
+    query = (
+        select(Textbook)
+        .where(Textbook.deleted_at.is_(None))
+        .options(selectinload(Textbook.teacher))
+        .order_by(Textbook.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    result = await db.execute(query)
+    textbooks = result.scalars().all()
+    
+    return [
+        AdminTextbookResponse(
+            id=t.id,
+            title=t.title,
+            status=t.status.value,
+            teacher_name=t.teacher.username if t.teacher else "系统默认",
+            created_at=t.created_at.isoformat(),
+        )
+        for t in textbooks
+    ]
+
+@router.get("/chat/sessions", response_model=List[AdminChatSessionResponse], summary="管理员获取所有对话会话审计列表")
+async def list_all_chat_sessions(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_admin),
+    skip: int = 0,
+    limit: int = 100,
+):
+    """
+    管理员拉取所有未被软删除的问答会话列表。
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    
+    query = (
+        select(ChatSession)
+        .where(ChatSession.deleted_at.is_(None))
+        .options(selectinload(ChatSession.student), selectinload(ChatSession.textbook))
+        .order_by(ChatSession.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+    )
+    result = await db.execute(query)
+    sessions = result.scalars().all()
+    
+    return [
+        AdminChatSessionResponse(
+            id=s.id,
+            title=s.title,
+            student_name=s.student.username if s.student else "未知学生",
+            textbook_title=s.textbook.title if s.textbook else "未知教材",
+            summary=s.summary,
+            created_at=s.created_at.isoformat(),
+        )
+        for s in sessions
+    ]
+
+@router.get("/chat/sessions/{session_id}/messages", response_model=List[AdminMessageResponse], summary="管理员调阅特定会话的全部消息历史")
+async def get_admin_session_messages(
+    session_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_admin),
+):
+    """
+    管理员强力审计：直接调阅任意特定会话的全部消息历史，不受班级与教师绑定限制。
+    """
+    # 验证会话存在且未被删除
+    from sqlalchemy import select
+    query = select(ChatSession).where(ChatSession.id == session_id, ChatSession.deleted_at.is_(None))
+    result = await db.execute(query)
+    session_obj = result.scalars().first()
+    if not session_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="会话不存在或已被删除"
+        )
+        
+    from crud import crud_message
+    messages = await crud_message.get_multi_by_session(
+        db, session_id=session_id, skip=skip, limit=limit
+    )
+    
+    return [
+        AdminMessageResponse(
+            id=msg.id,
+            sender=msg.sender.value,
+            content=msg.content,
+            reasoning_content=msg.reasoning_content,
+            created_at=msg.created_at.isoformat(),
+        )
+        for msg in messages
+    ]
+

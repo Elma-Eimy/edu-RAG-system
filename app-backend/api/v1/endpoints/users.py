@@ -96,6 +96,8 @@ async def login_access_token(
     OAuth2 兼容的 Token 登录，获取用于后续请求的 Bearer Access Token。
     """
     user = await crud_user.get_by_username(db, username=form_data.username)
+    if not user:
+        user = await crud_user.get_by_email(db, email=form_data.username)
     
     if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(status_code=400, detail="用户名、邮箱或密码错误")

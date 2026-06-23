@@ -46,12 +46,16 @@ class ChatSessionCreate(BaseModel):
 class ChatMessageRequest(BaseModel):
     session_id: int
     content: str
+    # 新增：是否启用深度思考模式（DeepSeek-R1）
+    reasoning: Optional[bool] = False
 
 
 class MessageResponse(BaseModel):
     id: int
     sender: SenderRole
     content: str
+    # 新增：返回前端的思考/推理过程文本
+    reasoning_content: Optional[str] = None
     created_at: str  # ISO-8601 字符串，前端直接渲染
 
     class Config:
@@ -117,7 +121,7 @@ async def create_chat_session(
     - 管理员：可为系统内任意状态为 SUCCESS 的教材创建会话。
     """
     if current_user.role == UserRole.STUDENT:
-        # 学生校验逻辑：必须与教材所在班级绑定
+        # 学生校验逻辑：必须与教材所在班级绑定，且教材必须已解析成功
         query = (
             select(Textbook)
             .join(ClassTextbook, ClassTextbook.textbook_id == Textbook.id)
@@ -125,6 +129,7 @@ async def create_chat_session(
             .join(CourseClass, CourseClass.id == ClassTextbook.class_id)
             .where(
                 Textbook.id == session_in.textbook_id,
+                Textbook.status == TextbookStatus.SUCCESS,
                 Textbook.deleted_at.is_(None),
                 StudentClass.student_id == current_user.id,
                 StudentClass.status == StudentClassStatus.APPROVED,
@@ -202,12 +207,12 @@ async def create_chat_session(
 # 2. 拉取当前学生的会话列表
 # ---------------------------------------------------------------------------
 
-@router.get("/sessions", response_model=List[ChatSessionResponse], summary="获取学生会话列表")
+@router.get("/sessions", response_model=List[ChatSessionResponse], summary="获取学生/测试用户会话列表")
 async def list_chat_sessions(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_student),
+    current_user: User = Depends(get_current_user),
 ):
-    """按创建时间倒序返回当前学生未删除的所有会话。教师审计请使用 GET /chat/teacher/student-chats。"""
+    """按创建时间倒序返回当前用户（学生或测试的教师/管理员）未删除的所有会话。"""
     sessions = await crud_chat_session.get_multi_by_student(db, student_id=current_user.id)
 
     return [
@@ -235,15 +240,39 @@ async def get_session_messages(
     skip: int = 0,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_student),  # 仅学生本人可访问自己的会话消息
+    current_user: User = Depends(get_current_user),  # 允许创建者本人访问自己的会话消息
 ):
     """
     拉取指定会话下的全部历史消息（按 created_at 升序，即对话时间顺序）。
 
     - skip / limit 支持分页，前端首次加载建议 limit=50，上翻时增加 skip。
-    - 只有会话归属学生本人才可访问（隐式校验）。
+    - 只有会话归属用户本人才可访问（隐式校验）。
     """
-    await _get_owned_session(session_id, current_user, db)
+    session = await _get_owned_session(session_id, current_user, db)
+    
+    if current_user.role == UserRole.STUDENT:
+        # 校验：此学生当前是否仍在已授权的、绑定了该教材的有效班级中，否则无权调阅历史消息
+        auth_query = (
+            select(Textbook.id)
+            .join(ClassTextbook, ClassTextbook.textbook_id == Textbook.id)
+            .join(StudentClass, StudentClass.class_id == ClassTextbook.class_id)
+            .join(CourseClass, CourseClass.id == ClassTextbook.class_id)
+            .where(
+                Textbook.id == session.textbook_id,
+                Textbook.deleted_at.is_(None),
+                StudentClass.student_id == current_user.id,
+                StudentClass.status == StudentClassStatus.APPROVED,
+                StudentClass.deleted_at.is_(None),
+                ClassTextbook.deleted_at.is_(None),
+                CourseClass.deleted_at.is_(None),
+            )
+        )
+        auth_result = await db.execute(auth_query)
+        if not auth_result.scalars().first():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="该会话关联的教材或班级已被解绑、软删除或您已被移出班级，无权调阅历史对话记录",
+            )
     messages = await crud_message.get_multi_by_session(db, session_id=session_id, skip=skip, limit=limit)
 
     return [
@@ -251,6 +280,8 @@ async def get_session_messages(
             id=msg.id,
             sender=msg.sender,
             content=msg.content,
+            # 新增：将数据库中的思考过程字段传递给前端
+            reasoning_content=msg.reasoning_content,
             created_at=msg.created_at.isoformat(),
         )
         for msg in messages
@@ -367,10 +398,13 @@ async def stream_chat(
 
     async def event_generator():
         full_ai_reply = ""
+        # 新增：记录完整的模型思考链路输出
+        full_reasoning_reply = ""
         try:
             import asyncio
+            # 新增：传递 reasoning 参数控制是否开启思考模式，使用 unified 模型及配置参数
             stream_response = await ai_service.chat_completion(
-                messages=messages_payload, stream=True
+                messages=messages_payload, stream=True, reasoning=chat_in.reasoning
             )
             
             # 使用 asyncio.wait_for 和迭代器，为流添加 settings.RERANK_SSE_HEARTBEAT_SECONDS 秒读取超时，超时则发送 SSE 注释维持长连接心跳
@@ -378,17 +412,27 @@ async def stream_chat(
             while True:
                 try:
                     chunk = await asyncio.wait_for(iterator.__anext__(), timeout=settings.RERANK_SSE_HEARTBEAT_SECONDS)
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        token = chunk.choices[0].delta.content
-                        full_ai_reply += token
-                        yield f"data: {json.dumps({'content': token}, ensure_ascii=False)}\n\n"
+                    if chunk.choices and chunk.choices[0].delta:
+                        delta = chunk.choices[0].delta
+                        
+                        # 1. 优先提取并推送模型的推理/思考内容（针对 DeepSeek R1/reasoner 模型）
+                        reasoning_token = getattr(delta, "reasoning_content", None)
+                        if reasoning_token:
+                            full_reasoning_reply += reasoning_token
+                            yield f"data: {json.dumps({'reasoning': reasoning_token}, ensure_ascii=False)}\n\n"
+                        
+                        # 2. 提取并推送正常的回答内容
+                        token = delta.content
+                        if token:
+                            full_ai_reply += token
+                            yield f"data: {json.dumps({'content': token}, ensure_ascii=False)}\n\n"
                 except asyncio.TimeoutError:
                     # 超时未获得新 Token，发送 SSE 规范内的空注释（心跳包），防止代理或网关超时掐断连接
                     yield ": ping\n\n"
                 except StopAsyncIteration:
                     break
 
-            # 流式迭代完毕后，使用独立的新数据库连接会话保存 AI 的完整回复内容，防止请求上下文中的主 session 已被回收
+            # 流式迭代完毕后，使用独立的新数据库连接会话保存 AI 的完整回复内容与思考内容，防止请求上下文中的主 session 已被回收
             async with AsyncSessionLocal() as generator_db:
                 await crud_message.create(
                     generator_db,
@@ -396,6 +440,7 @@ async def stream_chat(
                         "session_id": session_id,
                         "sender": SenderRole.AI,
                         "content": full_ai_reply,
+                        "reasoning_content": full_reasoning_reply if full_reasoning_reply else None,
                     }
                 )
 
@@ -411,8 +456,8 @@ async def stream_chat(
 
         except Exception as e:
             logger.exception("SSE 流式响应异常，会话 ID: %d", session_id)
-            # 若 AI 已生成部分内容，保存到数据库防止对话历史出现缺口
-            if full_ai_reply:
+            # 若 AI 已生成部分内容或思考内容，保存到数据库防止对话历史出现缺口
+            if full_ai_reply or full_reasoning_reply:
                 try:
                     async with AsyncSessionLocal() as fallback_db:
                         await crud_message.create(
@@ -421,6 +466,7 @@ async def stream_chat(
                                 "session_id": session_id,
                                 "sender": SenderRole.AI,
                                 "content": full_ai_reply + "\n\n[*回复因异常中断*]",
+                                "reasoning_content": full_reasoning_reply if full_reasoning_reply else None,
                             }
                         )
                 except Exception as save_err:
@@ -582,6 +628,8 @@ async def get_teacher_student_chat_messages(
             id=msg.id,
             sender=msg.sender,
             content=msg.content,
+            # 新增：支持教师审计调阅时返回学生的 AI 思考链内容
+            reasoning_content=msg.reasoning_content,
             created_at=msg.created_at.isoformat(),
         )
         for msg in messages
@@ -599,12 +647,24 @@ async def get_teacher_student_chat_messages(
 async def delete_chat_session(
     session_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_student),  # 仅学生本人可删除自己的会话
+    current_user: User = Depends(get_current_user),  # 允许创建者本人删除自己的会话
 ):
     """
     学生软删除自己的会话及历史消息。
     """
     session = await _get_owned_session(session_id, current_user, db)
     await crud_chat_session.remove(db, id=session.id)
+    
+    # 同步软删除该会话下的全部历史消息，防止消息孤儿数据堆积
+    from sqlalchemy import update as sa_update
+    from db.models.chat import Message
+    from datetime import datetime, timezone
+    await db.execute(
+        sa_update(Message)
+        .where(Message.session_id == session.id)
+        .values(deleted_at=datetime.now(timezone.utc))
+    )
+    await db.commit()
+    
     return {"message": "会话已删除"}
 
