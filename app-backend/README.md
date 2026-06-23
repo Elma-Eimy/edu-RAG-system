@@ -110,7 +110,7 @@ app-backend/
 
 ### 📚 教材解析 RAG 链路
 1. 教师上传 PDF → 写入数据库（`status=PENDING`）
-2. Celery Worker 后台解析：PDF 文字提取（PyMuPDF4LLM）→ OCR 兜底（PaddleOCR）→ 分块切片 → Embedding → 写入 ChromaDB 向量集合 + SQLite FTS5 全文索引
+2. Celery Worker 后台解析：PDF 物理提取（PyMuPDF4LLM）→ OCR 兜底（PaddleOCR）→ **层级父上下文切片（Hierarchical Parent-Context Chunking，自动解析段落标题层级并前置嵌入子块，保障小分块检索不失焦）** → Embedding → 写入 ChromaDB 向量集合 + SQLite FTS5 全文索引（修正了 `page_number` 1-indexed 的正确页码字段抽取）
 3. 前端轮询 `/textbooks/{id}/status` 直到 `success`
 
 ### 💬 SSE 流式问答
@@ -118,9 +118,9 @@ app-backend/
 用户提问
   → 实时鉴权（是否仍有权限访问该教材）
   → 写入 user 消息
-  → 拉取最近 N 轮历史（CHAT_HISTORY_WINDOW）
-  → 双路检索（ChromaDB 向量 + FTS5 全文）→ 候选块重排（RRF / LLM / Cohere）
-  → 构建 messages 载荷（系统提示 + RAG 上下文 + 历史）
+  → 多轮对话上下文检索提炼（Conversational Query Condensation，利用极速 LLM 对前序轮次与当前追问进行提炼生成 Standalone Search Query，避免追问或指代代词导致 RAG 检索跑偏）
+  → 双路检索（ChromaDB 向量 + FTS5 全文）→ 候选块重排（RRF 倒数排名融合 / LLM 启发式重排 / Cohere，修复了单项重排时的退化边界 Bug）
+  → 构建 messages 载荷（灵活系统提示词与注入指令：优先采用教材事实并标明出处页码，教材缺失时允许利用自身专业知识库进行补充拓展，但绝对不得与教材原文相违背）
   → 流式调用 LLM → SSE 推送 token
   → 流结束写入 AI 消息 → （可选）触发摘要压缩 Celery 任务
 ```
@@ -291,7 +291,8 @@ celery -A worker.celery_app worker --loglevel=info --concurrency=4
 | 班级 | `/api/v1/classes` | 创建班级、申请加入、批量审批、踢出学生、解散班级、看板数据 |
 | 教材 | `/api/v1/textbooks` | 上传 PDF、查看列表、状态轮询、绑定/解绑班级、删除 |
 | 对话 | `/api/v1/chat` | 创建会话、历史消息、SSE 流式问答、删除会话、教师审计 |
-| 管理员 | `/api/v1/admin` | 用户管理、冻结/解冻、审批教师、强制删除内容、系统配置、推送通知 |
+| 管理员 | `/api/v1/admin` | 用户管理、冻结/解冻、审批教师、全局教材及问答审计、强制删除内容、系统配置、推送通知 |
+
 
 ### 认证方式
 
