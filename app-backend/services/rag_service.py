@@ -138,6 +138,53 @@ class RAGService:
         return parent_chunks
 
 
+    async def condense_query(self, user_query: str, history: List[Dict[str, str]]) -> str:
+        """
+        基于历史对话和当前输入，生成一个独立的检索 Query。
+        例如，如果历史在谈论 fsck，用户输入是“能问的具体一点呢”，则重写为“fsck 的具体定义与工作流程”。
+        如果历史为空，或当前输入已经是一个明确独立的查询，则直接返回原输入。
+        """
+        if not history:
+            return user_query
+
+        # 构建对话上下文文本（仅提取最近两轮，既提高速度又聚焦核心上下文）
+        history_text = "\n".join(
+            f"{'学生' if h['role'] == 'user' else '助手'}: {h['content']}"
+            for h in history[-4:]
+        )
+
+        system_prompt = (
+            "你是一个 RAG 检索查询重写助手。你的任务是根据给出的对话历史和学生当前的问题，"
+            "判断学生的问题是否是一个需要结合上下文的追问、指代词查询或简短的后续要求（例如：能具体一点吗、它是什么、解释第一条）。"
+            "如果是追问，请将其补全为一个独立、语义完整的搜索关键词（包含具体概念名称）。"
+            "如果是独立的全新提问，请直接返回原问题的文字，不要做任何修改。"
+            "注意：只输出重写后的独立搜索词纯文本，不要包含任何解释、分析、引号标点。"
+        )
+
+        user_content = (
+            f"对话历史：\n{history_text}\n\n"
+            f"学生当前问题：{user_query}\n\n"
+            f"重写后的独立搜索词："
+        )
+
+        try:
+            response = await self._ai_service.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                model=settings.LLM_MODEL_NAME # 使用速度极快的普通大模型而非思考模型
+            )
+            condensed = response.choices[0].message.content.strip()
+            condensed = condensed.replace('"', '').replace("'", "").strip()
+            if condensed:
+                logger.info("RAG Query Condensed: '%s' -> '%s'", user_query, condensed)
+                return condensed
+        except Exception as e:
+            logger.error("Failed to condense RAG query: %s", e)
+            
+        return user_query
+
     # ------------------------------------------------------------------
     # 公开接口 2：组装并构建完整的大模型输入 Payload 列表
     # ------------------------------------------------------------------
@@ -158,13 +205,16 @@ class RAGService:
             history     : 已经提取出的最近几轮的历史聊天信息列表，
                           每一项格式为 {"role": "user"/"assistant", "content": "..."}
         """
-        # 1. 检索教材关联度最高的内容片段
-        chunks = await self.query_context(textbook_id, user_query)
+        # 1. 对当前提问进行语义提炼重写，防止追问/代词引起检索失焦
+        search_query = await self.condense_query(user_query, history)
 
-        # 2. 获取预设的系统提示词（System Prompt）
+        # 2. 检索教材关联度最高的内容片段
+        chunks = await self.query_context(textbook_id, search_query)
+
+        # 3. 获取预设的系统提示词（System Prompt）
         system_content = settings.CHAT_SYSTEM_PROMPT
 
-        # 3. 如果召回到了教材内容，将其作为增强上下文拼装入用户的当前提问中
+        # 4. 如果召回到了教材内容，将其作为增强上下文拼装入用户的当前提问中
         if chunks:
             rag_context = "\n\n".join(
                 f"【参考片段 {i + 1}】\n{chunk}" for i, chunk in enumerate(chunks)
@@ -174,7 +224,8 @@ class RAGService:
                 f"{rag_context}\n\n"
                 f"---\n\n"
                 f"学生问题：{user_query}\n\n"
-                f"请严格根据以上参考片段回答问题，并在回答中明确指出依据的页码（例如：根据教材第X页...）。"
+                f"请优先结合以上参考资料进行精准解答，并在回答中明确指出依据的页码（例如：根据教材第X页...）。"
+                f"如果参考资料中没有或仅有部分相关内容，允许你使用自身专业知识进行补充与拓展，但你的回答绝对不得与参考资料中已有的事实相冲突或违背。"
             )
         else:
             # 如果教材未处理完毕或者检索召回为空，依然允许直接和大模型对话，只是没有 RAG 原文佐证

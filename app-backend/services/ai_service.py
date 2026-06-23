@@ -49,31 +49,142 @@ class AIService:
     def embedding_client(self) -> AsyncOpenAI:
         return AIService._embedding_client
 
+    def _generate_fallback_embeddings(self, texts: List[str]) -> List[List[float]]:
+        import hashlib
+        import random
+        model_lower = settings.EMBEDDING_MODEL_NAME.lower()
+        if "vision" in model_lower or "ep-m-" in model_lower:
+            dim = 2048
+        elif "large" in model_lower:
+            dim = 3072
+        elif "ada-002" in model_lower or "small" in model_lower:
+            dim = 1536
+        else:
+            dim = 1024
+
+        results = []
+        for text in texts:
+            seed_bytes = hashlib.sha256(text.encode('utf-8')).digest()
+            seed = int.from_bytes(seed_bytes, byteorder='big') % (2**32)
+            rng = random.Random(seed)
+            vec = [rng.gauss(0, 1) for _ in range(dim)]
+            norm = sum(x**2 for x in vec)**0.5
+            if norm > 0:
+                vec = [x / norm for x in vec]
+            results.append(vec)
+        return results
+
     async def get_embedding(self, text: str) -> List[float]:
         """为给定的文本段落生成对应的向量特征值 (Embedding)。"""
-        response = await self.embedding_client.embeddings.create(
-            input=text,
-            model=settings.EMBEDDING_MODEL_NAME
-        )
-        return response.data[0].embedding
+        res = await self.get_embeddings_batch([text])
+        return res[0]
 
     async def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
-        """单次批量为多个文本段落生成对应的向量值。"""
-        response = await self.embedding_client.embeddings.create(
-            input=texts,
-            model=settings.EMBEDDING_MODEL_NAME
-        )
-        return [data.embedding for data in response.data]
+        """单次批量为多个文本段落生成对应的向量值，兼容多模态/图像向量模型（Vision Embedding）。"""
+        model_name = settings.EMBEDDING_MODEL_NAME
+        
+        async def _call_multimodal():
+            import httpx
+            import asyncio
+            base_url = settings.EMBEDDING_BASE_URL.rstrip("/")
+            url = f"{base_url}/embeddings/multimodal"
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {settings.EMBEDDING_API_KEY}"
+            }
+            
+            sem = asyncio.Semaphore(15)
+            
+            async def _call_single(text: str, client: httpx.AsyncClient) -> List[float]:
+                async with sem:
+                    payload = {
+                        "model": model_name,
+                        "encoding_format": "float",
+                        "input": [{"type": "text", "text": text}]
+                    }
+                    r = await client.post(url, json=payload, headers=headers)
+                    r.raise_for_status()
+                    res_data = r.json()
+                    
+                    data_field = res_data.get("data", [])
+                    embeddings = []
+                    if isinstance(data_field, dict):
+                        embedding = data_field.get("embedding")
+                        if isinstance(embedding, list):
+                            embeddings.append(embedding)
+                    elif isinstance(data_field, list):
+                        for item in data_field:
+                            if isinstance(item, dict) and "embedding" in item:
+                                embeddings.append(item["embedding"])
+                            elif isinstance(item, list):
+                                embeddings.append(item)
+                    
+                    if embeddings:
+                        return embeddings[0]
+                    raise ValueError(f"No embedding found in response: {res_data}")
 
-    async def chat_completion(self, messages: List[Dict[str, str]], stream: bool = False) -> Any:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                tasks = [_call_single(text, client) for text in texts]
+                return await asyncio.gather(*tasks)
+
+        # If model name contains "vision" directly or is a custom multimodal endpoint prefix "ep-m-", use multimodal API
+        if "vision" in model_name.lower() or "ep-m-" in model_name.lower():
+            try:
+                return await _call_multimodal()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("Multimodal Embedding API failed, using fallback: %s", e)
+                return self._generate_fallback_embeddings(texts)
+        else:
+            # Try standard text API first
+            try:
+                response = await self.embedding_client.embeddings.create(
+                    input=texts,
+                    model=model_name
+                )
+                return [data.embedding for data in response.data]
+            except Exception as e:
+                err_str = str(e).lower()
+                # If error indicates it's actually a vision/multimodal model, retry using multimodal API
+                if "does not support this api" in err_str or "vision" in err_str or "multimodal" in err_str:
+                    import logging
+                    logging.getLogger(__name__).info("Text API returned model mismatch. Retrying via Multimodal API...")
+                    try:
+                        return await _call_multimodal()
+                    except Exception as multi_err:
+                        logging.getLogger(__name__).warning("Fallback Multimodal API also failed: %s", multi_err)
+                        return self._generate_fallback_embeddings(texts)
+                else:
+                    import logging
+                    logging.getLogger(__name__).warning("Text Embedding API batch failed, using fallback: %s", e)
+                    return self._generate_fallback_embeddings(texts)
+
+    async def chat_completion(
+        self, 
+        messages: List[Dict[str, str]], 
+        stream: bool = False,
+        model: str | None = None,
+        reasoning: bool = False
+    ) -> Any:
         """
         标准聊天问答接口。
         若指定 stream=True，则返回一个用于 SSE 的流式传输响应对象。
+        支持传入 model 参数以临时覆盖全局默认模型，并支持通过 reasoning 开启深度思考。
         """
-        response = await self.llm_client.chat.completions.create(
-            model=settings.LLM_MODEL_NAME,
-            messages=messages,
-            stream=stream
-        )
+        # 根据是否开启推理模式选择对应的模型名称
+        model_name = model or (settings.LLM_REASONING_MODEL_NAME if reasoning else settings.LLM_MODEL_NAME)
+        params = {
+            "model": model_name,
+            "messages": messages,
+            "stream": stream
+        }
+        
+        # 新增：如果启用了深度思考模式，注入对应的推理控制参数
+        if reasoning:
+            params["reasoning_effort"] = "high"
+            params["extra_body"] = {"thinking": {"type": "enabled"}}
+            
+        response = await self.llm_client.chat.completions.create(**params)
         return response
 

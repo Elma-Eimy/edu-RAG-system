@@ -314,8 +314,8 @@ class Reranker:
                     except (ValueError, TypeError):
                         continue
                 
-                # 如果挑选出的优质片段不足 2 个，采用前置截断兜底以防上下文过少
-                if len(reranked) >= 2:
+                # 如果挑选出的优质片段大于等于 1 个，正常返回重排后内容
+                if len(reranked) >= 1:
                     return reranked[:top_k]
                     
         except Exception as e:
