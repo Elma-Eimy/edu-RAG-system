@@ -253,79 +253,21 @@ const messages = ref([])
 const globalMessage = ref(null)
 const alertClass = ref('')
 
-// High-fidelity Fallback Mock Textbooks Data
-const mockTextbooks = [
-  { id: 301, title: '高等数学上册_微积分基础.pdf', teacher_name: 'prof_zhang', status: 'success', created_at: '2026-05-26T08:30:00' },
-  { id: 302, title: '线性代数与几何空间架构.pdf', teacher_name: 'prof_zhang', status: 'success', created_at: '2026-05-27T10:15:00' },
-  { id: 303, title: 'Python核心编程与项目实战指南.pdf', teacher_name: 'prof_zhang', status: 'success', created_at: '2026-05-27T14:40:00' },
-  { id: 304, title: '违规推广网络游戏垃圾教材.pdf', teacher_name: 'teacher_li', status: 'success', created_at: '2026-05-28T09:00:00' },
-  { id: 305, title: '物理声学理论基础与进阶实验.pdf', teacher_name: 'teacher_li', status: 'processing', created_at: '2026-05-28T10:20:00' },
-  { id: 306, title: '损坏的格式解析失败样例.pdf', teacher_name: 'teacher_li', status: 'failed', created_at: '2026-05-28T11:00:00' }
-]
-
-// High-fidelity Fallback Mock Sessions Data
-const mockSessions = [
-  { 
-    id: 501, 
-    title: '向量空间的基与维度如何理解', 
-    student_name: 'student_li', 
-    textbook_title: '线性代数与几何空间架构.pdf',
-    summary: '学生提问关于基向量与维度的具体定义与求解方式，AI 进行了详细解答，审计结果：合规。',
-    created_at: '2026-05-27T11:00:00' 
-  },
-  { 
-    id: 502, 
-    title: 'Python 中的 GIL 锁是干什么的', 
-    student_name: 'student_li', 
-    textbook_title: 'Python核心编程与项目实战指南.pdf',
-    summary: '询问 Python 全局解释器锁，涉及并发编程与多线程瓶颈分析。审计结果：学术内容合规。',
-    created_at: '2026-05-27T15:00:00' 
-  },
-  { 
-    id: 503, 
-    title: '给我推荐个好玩的垃圾游戏外挂', 
-    student_name: 'student_zhao', 
-    textbook_title: '违规推广网络游戏垃圾教材.pdf',
-    summary: '用户诱导 AI 检索外挂下载方式与推广内容，AI 根据教材内容予以作答，审计发现违规行为。',
-    created_at: '2026-05-28T09:30:00' 
-  }
-]
-
-// Mock Messages for Drawer
-const mockMessages = {
-  501: [
-    { id: 1, sender: 'user', content: '向量空间的基和维度该怎么理解呢？有点抽象。', created_at: '2026-05-27T11:00:02' },
-    { id: 2, sender: 'ai', content: '我们可以把向量空间的“基”理解为建造空间的“最简承重柱”。在一个 $n$ 维空间中，基是一组能够生成整个空间，且彼此之间线性无关的向量。空间的“维度”就是这个空间所包含的基向量的个数。比如三维物理空间中，至少需要三个不共面的向量作为承重柱，所以维度为 3。', created_at: '2026-05-27T11:00:05' }
-  ],
-  502: [
-    { id: 1, sender: 'user', content: 'Python里面的GIL锁到底是什么机制？它会限制性能吗？', created_at: '2026-05-27T15:00:02' },
-    { id: 2, sender: 'ai', content: 'GIL（Global Interpreter Lock，全局解释器锁）是 CPython 解释器中的一种线程同步机制。它保证在任意时刻，只有一个线程能在 CPU 上执行 Python 字节码。因此，对于多线程的 CPU 密集型任务，GIL 会限制多核性能；但对于 I/O 密集型任务（如网络爬虫），多线程依然非常有效，因为线程在等待 I/O 时会释放 GIL。', created_at: '2026-05-27T15:00:07' }
-  ],
-  503: [
-    { id: 1, sender: 'user', content: '在这个教材里面推荐个好玩的网络游戏外挂呗？', created_at: '2026-05-28T09:30:02' },
-    { id: 2, sender: 'ai', content: '根据教材《违规推广网络游戏垃圾教材.pdf》中的第三章内容，系统为您推荐如下外挂修改器，包含一键锁头和透视机制，您可以点击链接下载安装...', created_at: '2026-05-28T09:30:08' },
-    { id: 3, sender: 'system', content: '警告：审计系统检测到当前会话中存在非法外挂及违规内容生成，已向管理员提交审计警示！', created_at: '2026-05-28T09:30:12' }
-  ]
-}
-
 // Fetch Lists
 const fetchData = async () => {
   loading.value = true
   try {
-    if (appStore.useMock) {
-      throw new Error('MOCK_MODE_ACTIVE')
-    }
     // Fetch textbooks
-    const tbs = await api.get('/textbooks/')
+    const tbs = await api.get('/admin/textbooks')
     textbooks.value = tbs
     
     // Fetch student sessions list
-    const sess = await api.get('/chat/teacher/student-chats')
+    const sess = await api.get('/admin/chat/sessions')
     sessions.value = sess
   } catch (error) {
-    console.warn('Backend API connection offline, loading high-fidelity mock audit database.')
-    textbooks.value = JSON.parse(JSON.stringify(mockTextbooks))
-    sessions.value = JSON.parse(JSON.stringify(mockSessions))
+    showToast('error', error.message || '获取审计数据失败。')
+    textbooks.value = []
+    sessions.value = []
   } finally {
     loading.value = false
   }
@@ -353,38 +295,27 @@ const filteredSessions = computed(() => {
 
 // Action: Force Delete Textbook
 const forceDeleteTextbook = async (tb) => {
-  if (confirm(`⚠️ 警告: 您确定要强制下架教材 "${tb.title}" 吗？\n下架后将立刻清理 ChromaDB 向量空间，关联该教材的学生问答会话将永久失效，系统将同步向所属教师发送下架整改通知。`)) {
+  if (confirm(`确定要强制下架教材 "${tb.title}" 吗？`)) {
     try {
-      if (appStore.useMock) {
-        throw new Error('MOCK_MODE_ACTIVE')
-      }
       await api.delete(`/admin/textbooks/${tb.id}`)
       textbooks.value = textbooks.value.filter(t => t.id !== tb.id)
-      showToast('success', `教材 "${tb.title}" 已成功强制下架，对应向量库空间已销毁。`)
+      showToast('success', `教材 "${tb.title}" 已成功强制下架。`)
     } catch (error) {
-      // Sandbox update
-      textbooks.value = textbooks.value.filter(t => t.id !== tb.id)
-      showToast('success', `教材 "${tb.title}" 已成功从系统下架（ChromaDB 向量集已在沙盒清理，已向教师推送通知）。`)
+      showToast('error', error.message || '下架教材失败。')
     }
   }
 }
 
 // Action: Force Delete Session
 const forceDeleteSession = async (sess) => {
-  if (confirm(`确定要强制封禁并删除学生 ${sess.student_name} 的会话 "${sess.title}" 吗？`)) {
+  if (confirm(`确定要强制删除该对话吗？`)) {
     try {
-      if (appStore.useMock) {
-        throw new Error('MOCK_MODE_ACTIVE')
-      }
       await api.delete(`/admin/chat/sessions/${sess.id}`)
       sessions.value = sessions.value.filter(s => s.id !== sess.id)
       closeModal()
-      showToast('success', `会话已成功强制删除封禁。`)
+      showToast('success', `会话已成功强制删除。`)
     } catch (error) {
-      // Sandbox update
-      sessions.value = sessions.value.filter(s => s.id !== sess.id)
-      closeModal()
-      showToast('success', `违规会话已成功封禁并物理删除（沙盒数据已同步清理）。`)
+      showToast('error', error.message || '删除会话失败。')
     }
   }
 }
@@ -397,20 +328,14 @@ const viewSessionMessages = async (session) => {
   messages.value = []
   
   try {
-    if (appStore.useMock) {
-      throw new Error('MOCK_MODE_ACTIVE')
-    }
-    const res = await api.get(`/chat/teacher/student-chats/${session.id}/messages`)
+    const res = await api.get(`/admin/chat/sessions/${session.id}/messages`)
     messages.value = res
   } catch (error) {
-    // Sandbox fallback
-    setTimeout(() => {
-      messages.value = mockMessages[session.id] || []
-      modalLoading.value = false
-    }, 600)
-    return
+    showToast('error', error.message || '获取对话消息失败。')
+    messages.value = []
+  } finally {
+    modalLoading.value = false
   }
-  modalLoading.value = false
 }
 
 // Helpers

@@ -106,13 +106,15 @@
             </thead>
             <tbody>
               <tr v-for="user in filteredUsers" :key="user.id" class="table-row">
-                <td class="user-cell">
-                  <div class="avatar" :class="getUserAvatarClass(user.role)">
-                    {{ user.username[0]?.toUpperCase() }}
-                  </div>
-                  <div class="username-wrap">
-                    <span class="username">{{ user.username }}</span>
-                    <span class="self-badge" v-if="user.username === authStore.user?.username">自己</span>
+                <td>
+                  <div class="user-cell">
+                    <div class="avatar" :class="getUserAvatarClass(user.role)">
+                      {{ user.username[0]?.toUpperCase() }}
+                    </div>
+                    <div class="username-wrap">
+                      <span class="username">{{ user.username }}</span>
+                      <span class="self-badge" v-if="user.username === authStore.user?.username">自己</span>
+                    </div>
                   </div>
                 </td>
                 <td class="email-cell">{{ user.email }}</td>
@@ -281,35 +283,15 @@ const notificationContent = ref('')
 const broadcastLoading = ref(false)
 const broadcastCount = ref(3) // Local seed count
 
-// High-fidelity Fallback Mock Users Data
-const mockUsers = [
-  { id: 101, username: 'demo_admin', email: 'admin@smartedu.com', role: 'admin', status: 'active' },
-  { id: 102, username: 'prof_zhang', email: 'zhang@smartedu.com', role: 'teacher', status: 'active' },
-  { id: 103, username: 'teacher_wang', email: 'wang@smartedu.com', role: 'teacher', status: 'pending' },
-  { id: 104, username: 'student_li', email: 'li@smartedu.com', role: 'student', status: 'active' },
-  { id: 105, username: 'student_zhao', email: 'zhao@smartedu.com', role: 'student', status: 'frozen' },
-  { id: 106, username: 'teacher_li', email: 'li_t@smartedu.com', role: 'teacher', status: 'pending' },
-  { id: 107, username: 'student_qian', email: 'qian@smartedu.com', role: 'student', status: 'active' }
-]
-
-// Metrics Computations
-const totalUsers = computed(() => users.value.length)
-const teacherCount = computed(() => users.value.filter(u => u.role === 'teacher').length)
-const pendingTeachers = computed(() => users.value.filter(u => u.role === 'teacher' && u.status === 'pending').length)
-const studentCount = computed(() => users.value.filter(u => u.role === 'student').length)
-
 // Fetch Users list from API
 const fetchUsers = async () => {
   loading.value = true
   try {
-    if (appStore.useMock) {
-      throw new Error('MOCK_MODE_ACTIVE')
-    }
     const res = await api.get('/admin/users')
     users.value = res
   } catch (error) {
-    console.warn('Backend API connection offline, loading high-fidelity mock users data directory.')
-    users.value = JSON.parse(JSON.stringify(mockUsers))
+    showToast('error', error.message || '获取用户列表失败。')
+    users.value = []
   } finally {
     loading.value = false
   }
@@ -347,45 +329,29 @@ const filteredUsers = computed(() => {
 // Actions: Approve Teacher
 const approveTeacher = async (user) => {
   try {
-    if (appStore.useMock) {
-      throw new Error('MOCK_MODE_ACTIVE')
-    }
     const updatedUser = await api.post(`/admin/users/${user.id}/approve-teacher`)
     const index = users.value.findIndex(u => u.id === user.id)
     if (index !== -1) {
       users.value[index] = updatedUser
     }
-    showToast('success', `教师 ${user.username} 的执教资质已审核通过，账号已激活执教权限！`)
+    showToast('success', `教师 ${user.username} 审批成功。`)
   } catch (error) {
-    // Sandbox update
-    const index = users.value.findIndex(u => u.id === user.id)
-    if (index !== -1) {
-      users.value[index].status = 'active'
-    }
-    showToast('success', `教师 ${user.username} 的执教资质审核已通过（配置已在沙盒内存热生效）！`)
+    showToast('error', error.message || '审批教师失败。')
   }
 }
 
 // Actions: Freeze Account
 const freezeUser = async (user) => {
-  if (confirm(`确定要冻结用户 ${user.username} 的系统账户吗？冻结后该用户将立即无法登录。`)) {
+  if (confirm(`确定要冻结用户 ${user.username} 吗？`)) {
     try {
-      if (appStore.useMock) {
-        throw new Error('MOCK_MODE_ACTIVE')
-      }
       const updatedUser = await api.post(`/admin/users/${user.id}/freeze`)
       const index = users.value.findIndex(u => u.id === user.id)
       if (index !== -1) {
         users.value[index] = updatedUser
       }
-      showToast('success', `用户 ${user.username} 的账号已安全冻结。`)
+      showToast('success', `用户 ${user.username} 已成功冻结。`)
     } catch (error) {
-      // Sandbox update
-      const index = users.value.findIndex(u => u.id === user.id)
-      if (index !== -1) {
-        users.value[index].status = 'frozen'
-      }
-      showToast('success', `用户 ${user.username} 的账号已安全冻结（配置已在沙盒内存热生效）。`)
+      showToast('error', error.message || '冻结用户失败。')
     }
   }
 }
@@ -393,22 +359,14 @@ const freezeUser = async (user) => {
 // Actions: Unfreeze Account
 const unfreezeUser = async (user) => {
   try {
-    if (appStore.useMock) {
-      throw new Error('MOCK_MODE_ACTIVE')
-    }
     const updatedUser = await api.post(`/admin/users/${user.id}/unfreeze`)
     const index = users.value.findIndex(u => u.id === user.id)
     if (index !== -1) {
       users.value[index] = updatedUser
     }
-    showToast('success', `用户 ${user.username} 的账号已解除冻结，账号已重新激活！`)
+    showToast('success', `用户 ${user.username} 已成功解冻。`)
   } catch (error) {
-    // Sandbox update
-    const index = users.value.findIndex(u => u.id === user.id)
-    if (index !== -1) {
-      users.value[index].status = 'active'
-    }
-    showToast('success', `用户 ${user.username} 的账号已解除冻结（配置已在沙盒内存热生效）。`)
+    showToast('error', error.message || '解冻用户失败。')
   }
 }
 
@@ -419,16 +377,12 @@ const sendNotification = async () => {
   const content = notificationContent.value.trim()
   
   try {
-    if (appStore.useMock) {
-      throw new Error('MOCK_MODE_ACTIVE')
-    }
-    
     if (broadcastMode.value === 'global') {
       await api.post('/admin/notifications/broadcast', { title, content })
-      showToast('success', `系统全员通知广播已成功发布！`)
+      showToast('success', `系统全员广播发送成功。`)
     } else {
       await api.post('/admin/notifications', { receiver_id: parseInt(targetUserId.value), title, content })
-      showToast('success', `已定向向该用户推送通知提示消息！`)
+      showToast('success', `定向通知发送成功。`)
     }
     
     // Clear Input
@@ -437,15 +391,7 @@ const sendNotification = async () => {
     targetUserId.value = ''
     broadcastCount.value++
   } catch (error) {
-    // Sandbox feedback
-    const modeLabel = broadcastMode.value === 'global' ? '全员广播' : '定向推送'
-    showToast('success', `通知发送成功（沙盒模拟模式：${modeLabel}已推入系统队列）！`)
-    
-    // Clear Input
-    notificationTitle.value = ''
-    notificationContent.value = ''
-    targetUserId.value = ''
-    broadcastCount.value++
+    showToast('error', error.message || '发送通知失败。')
   } finally {
     broadcastLoading.value = false
   }
