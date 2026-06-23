@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = "https://api.openai.com/v1"
     LLM_MODEL_NAME: str = "gpt-4o"
+    # 新增：深度思考推理模型名称（如 deepseek-v4-pro）
+    LLM_REASONING_MODEL_NAME: str = "deepseek-v4-pro"
     
     EMBEDDING_API_KEY: str = ""
     EMBEDDING_BASE_URL: str = "https://api.openai.com/v1"
@@ -67,10 +69,10 @@ class Settings(BaseSettings):
     RERANK_CANDIDATES: int = 12
     # 系统提示词（可通过 .env 覆盖）
     CHAT_SYSTEM_PROMPT: str = (
-        "你是一名专业的 AI 教学助手，正在辅导学生学习教材内容。"
-        "请根据【参考资料】中的原文内容，结合学生的问题进行精准解答。"
-        "若参考资料中没有相关内容，请如实告知学生，不要编造答案。"
-        "回答时请使用 Markdown 格式，结构清晰。"
+        "你是一名专业的 AI 教学助手，正在辅导学生学习教材内容。请优先结合【参考资料】中的原文进行精准解答，"
+        "并在回答中明确指出依据的页码（例如：根据教材第X页...）。如果参考资料中没有或仅有部分相关内容，"
+        "允许你使用自身专业知识库进行补充与拓展回答，但你的回答内容绝对不得与参考资料中已有的事实相冲突或违背。"
+        "若完全基于自身知识回答，请在回答中说明。回答请使用 Markdown 格式，结构清晰。"
     )
     # 是否在消息超过阈值时触发历史摘要压缩（节省 Token）
     ENABLE_HISTORY_SUMMARY: bool = False
@@ -151,6 +153,8 @@ class Settings(BaseSettings):
                         openai = llm["openai"]
                         update_if_present("LLM_BASE_URL", openai.get("base_url"))
                         update_if_present("LLM_MODEL_NAME", openai.get("model_name"))
+                        # 新增：读取深度思考模型配置名称
+                        update_if_present("LLM_REASONING_MODEL_NAME", openai.get("reasoning_model_name"))
                         # ⚠️  API Key 仅允许通过 .env 配置，config.yaml 不得覆盖
                     if "embedding" in llm:
                         emb = llm["embedding"]
