@@ -1,5 +1,13 @@
 <template>
   <div class="chat-container">
+    <!-- Feedback alert banner -->
+    <transition name="slide-down">
+      <div class="alert" :class="alertClass" v-if="globalMessage">
+        <span><i :class="globalMessage.type === 'success' ? 'ph ph-check-circle' : 'ph ph-warning'"></i></span>
+        {{ globalMessage.text }}
+      </div>
+    </transition>
+
     <!-- Left Sidebar: Session List -->
     <div class="sessions-sidebar glass-panel animate-fade">
       <div class="sidebar-header">
@@ -66,10 +74,34 @@
 
             <!-- Bubble Content -->
             <div class="message-bubble">
-              <div class="bubble-content">
-                {{ msg.content }}
-                <!-- Streaming cursor (rendered only for AI active writing) -->
-                <span class="streaming-cursor" v-if="msg.isStreaming"></span>
+              <!-- 深度思考模块：只在有推理思考内容时显示，允许展开与折叠 -->
+              <div class="thinking-box" v-if="msg.reasoning_content">
+                <div class="thinking-header" @click="msg.showThinking = !msg.showThinking">
+                  <span class="thinking-title">
+                    <i class="ph ph-brain"></i>
+                    {{ msg.isThinking ? '正在思考中...' : '已完成思考' }}
+                  </span>
+                  <span class="toggle-icon">
+                    <i :class="msg.showThinking ? 'ph ph-caret-up' : 'ph ph-caret-down'"></i>
+                  </span>
+                </div>
+                <div class="thinking-content" v-if="msg.showThinking">
+                  {{ msg.reasoning_content }}
+                </div>
+              </div>
+
+              <!-- 回答正文：普通消息、流式输出、或等待大模型返回时展示等待动画 -->
+              <div class="bubble-content" v-if="msg.content || (msg.isStreaming && !msg.reasoning_content)">
+                <div v-if="msg.isStreaming && !msg.content && !msg.reasoning_content" class="typing-indicator">
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                  <span class="dot"></span>
+                </div>
+                <div v-else>
+                  <div v-html="renderMarkdown(msg.content)"></div>
+                  <!-- 流式输出光标：仅在 AI 正在生成正文时展示 -->
+                  <span class="streaming-cursor" v-if="msg.isStreaming"></span>
+                </div>
               </div>
               <span class="message-time">{{ formatTime(msg.created_at) }}</span>
             </div>
@@ -87,6 +119,21 @@
 
       <!-- Input control drawer -->
       <div class="input-panel" v-if="activeSessionId">
+        <!-- 思考模式控制栏：可切换是否启用 DeepSeek-R1 思考链 -->
+        <div class="input-options-bar">
+          <label class="toggle-option-label">
+            <input 
+              type="checkbox" 
+              v-model="useReasoning" 
+              :disabled="streaming"
+              class="toggle-checkbox"
+            />
+            <span class="toggle-text">
+              <i class="ph ph-brain"></i> 深度思考模式 (DeepSeek-R1)
+            </span>
+          </label>
+        </div>
+
         <form @submit.prevent="handleSendMessage" class="input-form">
           <textarea 
             v-model="inputText" 
@@ -152,7 +199,7 @@
                   :key="tb.id" 
                   :value="tb.id"
                 >
-                  <i class="ph ph-book"></i> {{ tb.title }} (班级: {{ tb.className }})
+                  <i class="ph ph-book"></i> {{ tb.title }}{{ tb.className ? ' (班级: ' + tb.className + ')' : '' }}
                 </option>
               </select>
               <span class="input-helper">只有您已加入的班级所绑定的教材，才可在此进行提问。</span>
@@ -191,9 +238,10 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed, nextTick, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { api } from '../../utils/api'
 import { useAppStore } from '../../store/app'
+import { renderMarkdown } from '../../utils/markdown'
 
 const appStore = useAppStore()
 
@@ -201,8 +249,6 @@ const appStore = useAppStore()
 const sessions = ref([])
 const activeSessionId = ref(null)
 const messages = ref([])
-
-const mockSessionsMessages = ref({})
 
 const showNewChatModal = ref(false)
 const showConfirmDelete = ref(false)
@@ -212,44 +258,17 @@ const sessionToDelete = ref(null)
 const newChatTitle = ref('')
 const selectedTextbookId = ref('')
 const inputText = ref('')
+// 新增：深度思考模式开关状态
+const useReasoning = ref(false)
 
 const loading = ref(false)
 const streaming = ref(false)
 const modalLoading = ref(false)
 const modalError = ref('')
+const globalMessage = ref(null)
 const viewport = ref(null)
 
-// Mock Fallback Database
-const mockTextbooks = [
-  { id: 3, title: '高等数学上册', className: '高等数学 A 班' },
-  { id: 4, title: '线性代数与空间解析几何', className: '线性代数 B 班' }
-]
-
-const mockSessions = [
-  {
-    id: 12,
-    title: '向量空间的定义是什么',
-    textbook_id: 3,
-    created_at: new Date(Date.now() - 3600000).toISOString()
-  }
-]
-
-const mockMessages = [
-  {
-    id: 201,
-    sender: 'user',
-    content: '向量空间的定义是什么？',
-    created_at: new Date(Date.now() - 3500000).toISOString()
-  },
-  {
-    id: 202,
-    sender: 'ai',
-    content: '向量空间（线性空间）是一个集合，其元素称为“向量”。为了构成向量空间，该集合必须定义“向量加法”和“标量乘法”两种运算，并满足八条基本代数公理，例如加法交换律、结合律、存在零向量、存在逆向量，以及标量乘法的分配律等。最常见的例子就是我们熟悉的三维欧氏空间 R³。',
-    created_at: new Date(Date.now() - 3495000).toISOString()
-  }
-]
-
-const availableTextbooks = ref([...mockTextbooks])
+const availableTextbooks = ref([])
 
 // Computed Properties
 const activeSession = computed(() => {
@@ -262,6 +281,25 @@ const activeTextbookName = computed(() => {
   return tb ? tb.title : `未知教材 (ID: ${activeSession.value.textbook_id})`
 })
 
+const alertClass = computed(() => {
+  if (!globalMessage.value) return ''
+  return globalMessage.value.type === 'success' ? 'alert-success' : 'alert-danger'
+})
+
+const showErrorToast = (text) => {
+  globalMessage.value = { type: 'error', text }
+  setTimeout(() => {
+    globalMessage.value = null
+  }, 4000)
+}
+
+const showSuccessToast = (text) => {
+  globalMessage.value = { type: 'success', text }
+  setTimeout(() => {
+    globalMessage.value = null
+  }, 4000)
+}
+
 // Load session details
 const loadSessions = async () => {
   loading.value = true
@@ -269,8 +307,8 @@ const loadSessions = async () => {
     const res = await api.get('/chat/sessions')
     sessions.value = res
   } catch (error) {
-    console.warn('Backend API connection failed, falling back to mock session list.')
-    sessions.value = [...mockSessions]
+    showErrorToast(error.message || '获取会话列表失败。')
+    sessions.value = []
   } finally {
     loading.value = false
   }
@@ -279,22 +317,32 @@ const loadSessions = async () => {
 const loadMessages = async (sessionId) => {
   try {
     const res = await api.get(`/chat/sessions/${sessionId}/messages`)
-    messages.value = res
+    // 初始化历史消息的折叠状态：默认不展开历史思考链路
+    messages.value = res.map(msg => ({
+      ...msg,
+      showThinking: false,
+      isThinking: false
+    }))
   } catch (error) {
-    // If mock bypass
-    if (sessionId === 12) {
-      messages.value = [...mockMessages]
-    } else if (mockSessionsMessages.value[sessionId]) {
-      messages.value = [...mockSessionsMessages.value[sessionId]]
-    } else {
-      messages.value = []
-    }
+    showErrorToast(error.message || '获取历史消息失败。')
+    messages.value = []
   }
   scrollToBottom()
 }
 
+const loadTextbooks = async () => {
+  try {
+    const res = await api.get('/textbooks')
+    availableTextbooks.value = res
+  } catch (error) {
+    showErrorToast(error.message || '获取授权教材列表失败。')
+    availableTextbooks.value = []
+  }
+}
+
 onMounted(() => {
   loadSessions()
+  loadTextbooks()
 })
 
 const selectSession = (id) => {
@@ -318,10 +366,10 @@ const scrollToBottom = () => {
   })
 }
 
-// Watch active messages array to automatically adjust scrolling
-watch(messages, () => {
+// Watch active messages array length to automatically adjust scrolling
+watch(() => messages.value.length, () => {
   scrollToBottom()
-}, { deep: true })
+})
 
 // Modal control
 const openNewChatModal = () => {
@@ -351,20 +399,37 @@ const handleCreateSession = async () => {
     selectSession(newSession.id)
     closeNewChatModal()
   } catch (error) {
-    // Mock simulation
-    const mockNew = {
-      id: Math.floor(Math.random() * 1000) + 200,
-      title: sessionData.title,
-      textbook_id: sessionData.textbook_id,
-      created_at: new Date().toISOString()
-    }
-    sessions.value.unshift(mockNew)
-    selectSession(mockNew.id)
-    closeNewChatModal()
+    modalError.value = error.message || '新建会话失败，请重试。'
   } finally {
     modalLoading.value = false
   }
 }
+
+// Client-side typewriter stream smoothing queue
+let typewriterQueue = ''
+let typewriterInterval = null
+
+const startTypewriter = (msg) => {
+  if (typewriterInterval) clearInterval(typewriterInterval)
+  
+  typewriterInterval = setInterval(() => {
+    if (typewriterQueue.length > 0) {
+      // 动态吞吐速率，防止在长网络延迟后爆字堆积
+      const charsToTake = typewriterQueue.length > 35 ? 5 : typewriterQueue.length > 10 ? 2 : 1
+      const chunk = typewriterQueue.slice(0, charsToTake)
+      typewriterQueue = typewriterQueue.slice(charsToTake)
+      msg.content += chunk
+      scrollToBottom()
+    } else if (!msg.isStreaming) {
+      clearInterval(typewriterInterval)
+      typewriterInterval = null
+    }
+  }, 20) // 20ms 频率刷新字符，提供绝对丝滑手感
+}
+
+onUnmounted(() => {
+  if (typewriterInterval) clearInterval(typewriterInterval)
+})
 
 // Send Message handler (SSE native stream reader)
 const handleSendMessage = async () => {
@@ -382,26 +447,26 @@ const handleSendMessage = async () => {
   }
   messages.value.push(userMsg)
   
-  if (appStore.useMock) {
-    mockSessionsMessages.value[activeSessionId.value] = [...messages.value]
-  }
-  
   streaming.value = true
   
   // Append a placeholder AI message for streaming
+  // 新增：增加推理内容字段、正在思考状态，且默认展开思考内容面板
   const aiMsg = {
     id: Date.now() + 1,
     sender: 'ai',
     content: '',
+    reasoning_content: '',
+    isThinking: useReasoning.value,
+    showThinking: true,
     created_at: new Date().toISOString(),
     isStreaming: true
   }
   messages.value.push(aiMsg)
 
+  typewriterQueue = ''
+  startTypewriter(aiMsg)
+
   try {
-    if (appStore.useMock) {
-      throw new Error('MOCK_MODE_ACTIVE')
-    }
     // Try actual SSE connection over fetch ReadableStream
     const response = await fetch(`${api.baseUrl}/chat/stream`, {
       method: 'POST',
@@ -411,7 +476,9 @@ const handleSendMessage = async () => {
       },
       body: JSON.stringify({
         session_id: activeSessionId.value,
-        content: text
+        content: text,
+        // 新增：向后端传递是否启用思考模式的参数
+        reasoning: useReasoning.value
       })
     })
 
@@ -445,9 +512,17 @@ const handleSendMessage = async () => {
           
           try {
             const parsed = JSON.parse(dataStr)
-            if (parsed.content) {
-              aiMsg.content += parsed.content
+            
+            // 1. 如果是推理/思考内容，追加到推理字段，并维持 isThinking 为 true
+            if (parsed.reasoning) {
+              aiMsg.isThinking = true
+              aiMsg.reasoning_content += parsed.reasoning
               scrollToBottom()
+            } 
+            // 2. 如果是正文内容，追加到 typewriterQueue 进行平滑输出，并将 isThinking 标记为 false（思考完毕）
+            else if (parsed.content) {
+              aiMsg.isThinking = false
+              typewriterQueue += parsed.content
             } else if (parsed.error) {
               throw new Error(parsed.error)
             }
@@ -458,34 +533,10 @@ const handleSendMessage = async () => {
       }
     }
   } catch (error) {
-    // FALLBACK Mock typing animation simulator
-    console.warn('Backend SSE endpoint offline, generating sandbox AI response.')
-    
-    // Smart academic responses depending on query
-    let responseText = `收到您关于关联教材的问题。这是一个模拟沙盒环境。RAG 向量检索在此被激活，它通过将知识切片为 200 字块以注入 ChromaDB。您刚刚提问的内容是：“${text}”。在真实后端启动后，系统将流式输出完全定制化的解答。`
-    if (text.includes('向量') || text.includes('空间') || text.includes('线性')) {
-      responseText = '在线性代数中，向量空间（又称线性空间）是由称为向量的代数对象组成的集合。加法和标量乘法运算在其上有着良好定义。一个集合若要被认可为向量空间，必须在分配律、结合律、零向量等 8 条公理上完全自洽。'
-    } else if (text.includes('极限') || text.includes('微积分')) {
-      responseText = '在微积分学中，极限是核心支柱概念。导数定义为自变量趋近于零时函数增量之比的极限值。积分则是无限求和的极限。理解极限的 ε-δ 定义是踏入高等数学殿堂的关键。'
+    if (!aiMsg.content && !aiMsg.reasoning_content) {
+      messages.value = messages.value.filter(m => m.id !== aiMsg.id)
     }
-
-    let tokenIndex = 0
-    const tokens = responseText.split('')
-    const interval = setInterval(() => {
-      if (tokenIndex < tokens.length) {
-        aiMsg.content += tokens[tokenIndex]
-        tokenIndex++
-        scrollToBottom()
-      } else {
-        clearInterval(interval)
-        aiMsg.isStreaming = false
-        streaming.value = false
-        if (appStore.useMock) {
-          mockSessionsMessages.value[activeSessionId.value] = [...messages.value]
-        }
-      }
-    }, 45) // Typist speed
-    return // avoid triggering the final catch block immediately
+    showErrorToast(error.message || '发送消息失败，请检查网络或后端状态。')
   }
 
   aiMsg.isStreaming = false
@@ -760,6 +811,7 @@ const handleDeleteSession = async () => {
   line-height: 1.5;
   word-break: break-word;
   box-shadow: var(--shadow-sm);
+  white-space: pre-wrap;
 }
 
 /* User Message styling: royal gradient */
@@ -1032,5 +1084,187 @@ const handleDeleteSession = async () => {
 .slide-down-enter-from, .slide-down-leave-to {
   transform: translateY(-10px);
   opacity: 0;
+}
+
+/* Toast alert style */
+.alert {
+  position: absolute;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.75rem 1.25rem;
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  box-shadow: var(--shadow-md);
+  border: 1px solid transparent;
+  z-index: 10000;
+  min-width: 300px;
+}
+
+.alert-success {
+  background-color: var(--color-success-bg);
+  color: var(--color-success);
+  border-color: rgba(5, 150, 105, 0.15);
+}
+
+.alert-danger {
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger);
+  border-color: rgba(220, 38, 38, 0.15);
+}
+
+/* ==========================================================================
+   深度思考模式 (DeepSeek-R1) 专属组件样式 (使用 Phosphor Icons)
+   ========================================================================== */
+
+/* 思考盒子外层容器 */
+.thinking-box {
+  background-color: #f8fafc;
+  border-left: 3px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.75rem;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  border-top: 1px solid #e2e8f0;
+  border-right: 1px solid #e2e8f0;
+  border-bottom: 1px solid #e2e8f0;
+  width: 100%;
+}
+
+/* 思考控制栏头部 */
+.thinking-header {
+  padding: 0.65rem 0.875rem;
+  background-color: #f1f5f9;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.2s ease;
+}
+
+.thinking-header:hover {
+  background-color: #e2e8f0;
+}
+
+/* 思考栏标题与脑图图标 */
+.thinking-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.thinking-title i {
+  color: var(--color-primary);
+  font-size: 1rem;
+}
+
+/* 折叠展开指示角标 */
+.toggle-icon i {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* 思考内容主体：使用等宽字体呈现推导过程 */
+.thinking-content {
+  padding: 0.75rem 0.875rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  border-top: 1px solid #e2e8f0;
+  background-color: #fafafa;
+  font-family: Consolas, Monaco, monospace;
+}
+
+/* 输入框上方的思考模式选项切换栏 */
+.input-options-bar {
+  display: flex;
+  align-items: center;
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px dashed var(--border-color);
+}
+
+.toggle-option-label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle-checkbox {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+
+/* 开关文本与脑图图标 */
+.toggle-text {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  transition: color 0.2s ease;
+}
+
+.toggle-checkbox:checked + .toggle-text {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.toggle-text i {
+  font-size: 0.95rem;
+  color: var(--color-primary);
+}
+
+/* Typing Indicator Animation */
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  min-height: 20px;
+}
+
+.typing-indicator .dot {
+  width: 6px;
+  height: 6px;
+  background-color: var(--text-muted);
+  border-radius: 50%;
+  opacity: 0.4;
+  animation: bounce 1.4s infinite both;
+}
+
+.typing-indicator .dot:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.typing-indicator .dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-indicator .dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes bounce {
+  0%, 80%, 100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1.15);
+    opacity: 0.85;
+  }
 }
 </style>
