@@ -32,17 +32,18 @@ celery:
 llm:
   openai:
     base_url: "https://api.deepseek.com/v1"
-    model_name: "deepseek-v4-pro"
+    model_name: "deepseek-v4-flash"            # 默认非思考模型 (DeepSeek-V4-Flash)
+    reasoning_model_name: "deepseek-v4-pro"     # 深度思考模型 (DeepSeek-V4-Pro)
   embedding:
     base_url: "https://ark.cn-beijing.volces.com/api/v3"
-    model_name: "doubao-embedding-vision-251215"
+    model_name: "ep-m-20260315165133-9qttb"
 
 rag:
   chromadb_path: "./chroma_db"
   textbook_chunk_size: 200 # 语义切块上限（字符数）
   history_window_rounds: 5 # 对话轮数携带量（N轮 = N*2 条消息）
   top_k: 4 # 最终提供给大模型的增强上下文片段数
-  system_prompt: "你是一名专业的 AI 教学助手，正在辅导学生学习教材内容。请根据【参考资料】中的原文内容，结合学生的问题进行精准解答。若参考资料中没有相关内容，请如实告知学生，不要编造答案。回答时请使用 Markdown 格式，结构清晰。"
+  system_prompt: "你是一名专业的 AI 教学助手，正在辅导学生学习教材内容。请优先结合【参考资料】中的原文进行精准解答，并在回答中明确指出依据的页码（例如：根据教材第X页...）。如果参考资料中没有或仅有部分相关内容，允许你使用自身专业知识库进行补充与拓展回答，但你的回答内容绝对不得与参考资料中已有的事实相冲突或违背。若完全基于自身知识回答，请在回答中说明。回答请使用 Markdown 格式，结构清晰。"
   enable_history_summary: false # 是否开启消息压缩历史摘要
   history_summary_threshold: 20 # 触发摘要压缩消息数阈值
 
