@@ -15,6 +15,7 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_track_started=True,
+    task_always_eager=True, # 启用本地同步执行，无需依赖 Redis
 )
 
 # 自动发现 worker 模块中的任务

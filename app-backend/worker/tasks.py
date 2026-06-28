@@ -39,6 +39,22 @@ _sync_engine = create_engine(settings.sync_database_url, pool_pre_ping=True)
 # 内部：同步写库
 # ---------------------------------------------------------------------------
 
+_redis_available = True
+_redis_client = None
+
+def _get_redis_client():
+    global _redis_client
+    if _redis_client is None:
+        import redis
+        _redis_client = redis.Redis.from_url(
+            settings.REDIS_URL, 
+            decode_responses=True,
+            socket_connect_timeout=0.2, # 200ms timeout
+            socket_timeout=0.2          # 200ms timeout
+        )
+    return _redis_client
+
+
 def _update_textbook_status(
     textbook_id: int,
     status: TextbookStatus | None = None,
@@ -75,14 +91,17 @@ def _update_textbook_status(
         session.commit()
         
         # ── 同步清除该教材所属教师的列表与主看板缓存 ─────────────────────────────
-        if teacher_id:
+        # 仅在 status 实际改变时才需要清理列表/主看板缓存，进度百分比更新无需清理
+        global _redis_available
+        if status is not None and teacher_id and _redis_available:
             try:
-                import redis
-                r = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
-                r.delete(f"cache:textbooks:list:{teacher_id}")
+                r = _get_redis_client()
+                r.delete(f"cache:textbooks:list:teacher:{teacher_id}")
+                r.delete(f"cache:textbooks:list:admin:{teacher_id}")
                 r.delete(f"cache:teacher_dashboard:{teacher_id}")
             except Exception as e:
-                logger.warning("Failed to invalidate teacher caches in Celery worker: %s", e)
+                _redis_available = False
+                logger.warning("Failed to invalidate teacher caches in Celery worker (circuit breaker triggered): %s", e)
         
     log_msg = f"[Textbook {textbook_id}]"
     if status:
@@ -90,6 +109,27 @@ def _update_textbook_status(
     if progress is not None:
         log_msg += f" progress → {progress}%"
     logger.info(log_msg)
+
+
+def _run_async_in_thread(coro):
+    import threading
+    result = None
+    exception = None
+
+    def target():
+        nonlocal result, exception
+        try:
+            result = asyncio.run(coro)
+        except Exception as e:
+            exception = e
+
+    t = threading.Thread(target=target)
+    t.start()
+    t.join()
+
+    if exception:
+        raise exception
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +238,7 @@ def process_textbook_task(self, textbook_id: int, file_path: str):
                 progress = 30 + int((i + len(batch)) / total_chunks * 65)
                 _update_textbook_status(textbook_id, progress=progress)
 
-        asyncio.run(_embed_and_store_batches())
+        _run_async_in_thread(_embed_and_store_batches())
 
         # ── 阶段 4.5：同步建立 SQLite FTS5 全文检索索引 ───────────────────────
         try:
@@ -242,12 +282,12 @@ def process_textbook_task(self, textbook_id: int, file_path: str):
     max_retries=settings.CELERY_SUMMARIZE_CHAT_MAX_RETRIES,
     default_retry_delay=settings.CELERY_SUMMARIZE_CHAT_RETRY_DELAY,
 )
-def summarize_chat_session_task(self, session_id: int):
+def summarize_chat_session_task(self, session_id: int, force: bool = False):
     """
     根据会话的历史消息自动生成/更新摘要。
     会对 AI 回复内容进行代码块过滤与长度截断（脱水），以节省 Token。
     """
-    logger.info("[Task %s] Summarizing chat session %d", self.request.id, session_id)
+    logger.info("[Task %s] Summarizing chat session %d (force=%s)", self.request.id, session_id, force)
     
     # ── 阶段 1：快速查询所需数据库信息，并立即释放连接 ──────────────────────────
     with Session(_sync_engine) as session:
@@ -264,8 +304,13 @@ def summarize_chat_session_task(self, session_id: int):
             .all()
         )
         
-        # 如果对话太短（例如少于 2 轮即 4 条消息），则不更新摘要以节省 Token
-        if len(messages) < 4:
+        # 如果没有任何消息，跳过
+        if len(messages) == 0:
+            logger.info("ChatSession %d has no messages, skip summary generation.", session_id)
+            return
+
+        # 如果对话太短（例如少于 1 轮即 2 条消息）且没有强制运行，则不更新摘要以节省 Token
+        if len(messages) < 2 and not force:
             logger.info("ChatSession %d has only %d messages, skip summary generation.", session_id, len(messages))
             return
             
@@ -304,7 +349,7 @@ def summarize_chat_session_task(self, session_id: int):
             )
             return res.choices[0].message.content
             
-        summary_content = asyncio.run(_run_summary())
+        summary_content = _run_async_in_thread(_run_summary())
         summary_content = summary_content.strip()
         
     except Exception as exc:
