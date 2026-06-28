@@ -22,6 +22,12 @@ class User(Base, SoftDeleteMixin):
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.STUDENT)
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), default=UserStatus.ACTIVE)
 
+    # ── 新增教师资质审核字段 ────────────────────────────────────────────────
+    real_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    school_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    credential_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    credential_image_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # 实体间关系关联配置
     textbooks = relationship("Textbook", back_populates="teacher", cascade="all, delete-orphan")
     classes = relationship("CourseClass", back_populates="teacher", cascade="all, delete-orphan")

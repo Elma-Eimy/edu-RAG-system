@@ -6,7 +6,6 @@ engine = create_async_engine(
     settings.async_database_url,
     echo=False,
     future=True,
-    pool_pre_ping=True,    # 每次取连接前 ping 一次，自动剔除失效连接（防止 "MySQL server has gone away"）
     pool_recycle=3600,     # 连接最多复用 1 小时，防止超过 MySQL wait_timeout（默认 8h）后断裂
 )
 
