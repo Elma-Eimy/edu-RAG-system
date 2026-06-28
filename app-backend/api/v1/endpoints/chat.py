@@ -12,7 +12,7 @@ import json
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -295,6 +295,7 @@ async def get_session_messages(
 @router.post("/stream", summary="SSE 流式问答（含 RAG 上下文）")
 async def stream_chat(
     chat_in: ChatMessageRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -400,6 +401,7 @@ async def stream_chat(
         full_ai_reply = ""
         # 新增：记录完整的模型思考链路输出
         full_reasoning_reply = ""
+        saved = False
         try:
             import asyncio
             # 新增：传递 reasoning 参数控制是否开启思考模式，使用 unified 模型及配置参数
@@ -410,6 +412,9 @@ async def stream_chat(
             # 使用 asyncio.wait_for 和迭代器，为流添加 settings.RERANK_SSE_HEARTBEAT_SECONDS 秒读取超时，超时则发送 SSE 注释维持长连接心跳
             iterator = stream_response.__aiter__()
             while True:
+                if await request.is_disconnected():
+                    logger.info("Detected client disconnected inside stream loop.")
+                    raise asyncio.CancelledError()
                 try:
                     chunk = await asyncio.wait_for(iterator.__anext__(), timeout=settings.RERANK_SSE_HEARTBEAT_SECONDS)
                     if chunk.choices and chunk.choices[0].delta:
@@ -443,6 +448,7 @@ async def stream_chat(
                         "reasoning_content": full_reasoning_reply if full_reasoning_reply else None,
                     }
                 )
+            saved = True
 
             # 异步触发会话摘要提炼任务（受 ENABLE_HISTORY_SUMMARY 开关控制）
             if settings.ENABLE_HISTORY_SUMMARY:
@@ -457,7 +463,7 @@ async def stream_chat(
         except Exception as e:
             logger.exception("SSE 流式响应异常，会话 ID: %d", session_id)
             # 若 AI 已生成部分内容或思考内容，保存到数据库防止对话历史出现缺口
-            if full_ai_reply or full_reasoning_reply:
+            if not saved and (full_ai_reply or full_reasoning_reply):
                 try:
                     async with AsyncSessionLocal() as fallback_db:
                         await crud_message.create(
@@ -469,9 +475,34 @@ async def stream_chat(
                                 "reasoning_content": full_reasoning_reply if full_reasoning_reply else None,
                             }
                         )
+                    saved = True
+                    # 即使异常中断，如果开启了摘要，也重新提炼
+                    if settings.ENABLE_HISTORY_SUMMARY:
+                        from worker.tasks import summarize_chat_session_task
+                        summarize_chat_session_task.delay(session_id)
                 except Exception as save_err:
                     logger.error("Failed to save partial AI reply: %s", save_err)
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+        finally:
+            # ── 关键加固：处理连接被客户端断开/取消（GeneratorExit / CancelledError）的场景 ──
+            if not saved and (full_ai_reply or full_reasoning_reply):
+                try:
+                    async with AsyncSessionLocal() as final_db:
+                        await crud_message.create(
+                            final_db,
+                            obj_in={
+                                "session_id": session_id,
+                                "sender": SenderRole.AI,
+                                "content": full_ai_reply + "\n\n[*回复因连接断开而中断*]",
+                                "reasoning_content": full_reasoning_reply if full_reasoning_reply else None,
+                            }
+                        )
+                    # 连接断开保存残余回复后，重新提炼摘要
+                    if settings.ENABLE_HISTORY_SUMMARY:
+                        from worker.tasks import summarize_chat_session_task
+                        summarize_chat_session_task.delay(session_id)
+                except Exception as final_err:
+                    logger.error("Failed to save partial AI reply in finally block: %s", final_err)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -667,4 +698,59 @@ async def delete_chat_session(
     await db.commit()
     
     return {"message": "会话已删除"}
+
+@router.post(
+    "/teacher/student-chats/{session_id}/summarize",
+    summary="教师手动强制重新生成/更新学生会话的摘要",
+)
+async def summarize_student_chat(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_teacher),
+):
+    """
+    允许教师对指定的学生会话手动触发 AI 摘要提炼。
+    - 包含越权校验：必须属于该教师班级内的学生。
+    - 绕过普通自动触发的最小消息轮数限制，强制提炼当前所有对话历史。
+    """
+    # 越权校验：检查该会话是否属于当前教师所教的班级
+    auth_query = (
+        select(ChatSession)
+        .join(ClassTextbook, ClassTextbook.textbook_id == ChatSession.textbook_id)
+        .join(CourseClass, CourseClass.id == ClassTextbook.class_id)
+        .join(
+            StudentClass,
+            (StudentClass.class_id == CourseClass.id) & (StudentClass.student_id == ChatSession.student_id)
+        )
+        .where(
+            ChatSession.id == session_id,
+            ChatSession.deleted_at.is_(None),
+            CourseClass.teacher_id == current_user.id,
+            CourseClass.deleted_at.is_(None),
+            StudentClass.status == StudentClassStatus.APPROVED,
+            StudentClass.deleted_at.is_(None),
+            ClassTextbook.deleted_at.is_(None)
+        )
+    )
+    auth_result = await db.execute(auth_query)
+    session_obj = auth_result.scalars().first()
+    
+    if not session_obj:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="会话不存在或您没有权限为该会话生成摘要"
+        )
+        
+    # 强制触发摘要 Celery 任务，force=True 会跳过消息长度限制
+    try:
+        from worker.tasks import summarize_chat_session_task
+        summarize_chat_session_task.delay(session_id, force=True)
+    except Exception as e:
+        logger.error("Failed to enqueue force summarize_chat_session_task: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="任务队列服务暂时不可用，请稍后重试"
+        )
+        
+    return {"message": "已成功提交强制生成会话摘要任务，请稍后刷新列表查看"}
 

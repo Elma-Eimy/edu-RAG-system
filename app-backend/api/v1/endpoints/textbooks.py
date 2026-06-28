@@ -371,6 +371,38 @@ async def bind_classes(
     for class_id in to_bind:
         await crud_class_textbook.create_or_restore(db, class_id=class_id, textbook_id=textbook_id)
     
+    # ── 新增：批量发送教材绑定通知给班级里的学生 ───────────────────────────
+    if to_bind:
+        try:
+            from crud import crud_notification
+            for class_id in to_bind:
+                # 获取班级名称
+                cls_obj = next((c for c in teacher_classes if c.id == class_id), None)
+                cls_name = cls_obj.name if cls_obj else f"ID: {class_id}"
+                
+                # 查询该班级内 approved 的 student_id
+                s_query = select(StudentClass.student_id).where(
+                    StudentClass.class_id == class_id,
+                    StudentClass.status == StudentClassStatus.APPROVED,
+                    StudentClass.deleted_at.is_(None)
+                )
+                s_result = await db.execute(s_query)
+                s_ids = s_result.scalars().all()
+                
+                for sid in s_ids:
+                    await crud_notification.create(
+                        db,
+                        obj_in={
+                            "sender_id": current_user.id,
+                            "receiver_id": sid,
+                            "title": "新教材上架通知",
+                            "content": f"您所在的班级《{cls_name}》新上架了教材《{textbook.title}》，请开始学习！",
+                            "is_read": False
+                        }
+                    )
+        except Exception as e:
+            logger.error("Failed to send textbook binding notifications: %s", e)
+            
     # 批量解绑
     for binding in bindings_to_remove:
         await crud_class_textbook.remove(db, id=binding.id)
@@ -534,8 +566,41 @@ async def unbind_classes(
             student_ids = student_result.scalars().all()
             for sid in student_ids:
                 await redis_client.delete(f"cache:textbooks:list:student:{sid}")
+
+            # ── 软删除那些由于班级解绑彻底失去该教材授权的学生的 ChatSession ──
+            unique_student_ids = list(set(student_ids))
+            if unique_student_ids:
+                still_authorized_query = select(StudentClass.student_id).join(
+                    ClassTextbook,
+                    StudentClass.class_id == ClassTextbook.class_id
+                ).where(
+                    StudentClass.student_id.in_(unique_student_ids),
+                    StudentClass.status == StudentClassStatus.APPROVED,
+                    StudentClass.deleted_at.is_(None),
+                    ClassTextbook.textbook_id == textbook_id,
+                    ClassTextbook.class_id.notin_(valid_class_ids),
+                    ClassTextbook.deleted_at.is_(None)
+                )
+                still_authorized_result = await db.execute(still_authorized_query)
+                still_authorized_student_ids = set(still_authorized_result.scalars().all())
+                
+                unauthorized_student_ids = [sid for sid in unique_student_ids if sid not in still_authorized_student_ids]
+                
+                if unauthorized_student_ids:
+                    from db.models.chat import ChatSession
+                    sessions_query = select(ChatSession).where(
+                        ChatSession.textbook_id == textbook_id,
+                        ChatSession.student_id.in_(unauthorized_student_ids),
+                        ChatSession.deleted_at.is_(None)
+                    )
+                    sessions_result = await db.execute(sessions_query)
+                    for sess in sessions_result.scalars().all():
+                        sess.soft_delete()
+                        db.add(sess)
+                    await db.commit()
+                    logger.info("Soft-deleted chat sessions of textbook %d for students %s due to class unbinding", textbook_id, unauthorized_student_ids)
         except Exception as e:
-            logger.warning("Failed to invalidate student caches in unbind_classes: %s", e)
+            logger.warning("Failed to invalidate student caches or cleanup sessions in unbind_classes: %s", e)
 
     return {
         "message": "解绑成功" if unbound_count > 0 else "没有找到有效的绑定记录",
@@ -628,6 +693,14 @@ async def delete_textbook(
             logger.info("Deleted ChromaDB collection '%s' for textbook %d", chroma_collection_id, textbook_id)
         except Exception as e:
             logger.warning("Failed to delete ChromaDB collection for textbook %d: %s", textbook_id, e)
+
+    # ── 清理 FTS5 全文索引记录，防存储泄露 ─────────────────────────────────
+    try:
+        from services.rag_optimizer import FTSIndexManager
+        FTSIndexManager.delete_document_chunks(textbook_id)
+        logger.info("Deleted SQLite FTS5 records for textbook ID: %d", textbook_id)
+    except Exception as e:
+        logger.warning("Failed to delete SQLite FTS5 records for textbook %d: %s", textbook_id, e)
 
     # ── 彻底下架，失效教材列表缓存与看板数据缓存 ────────────────────────────────────
     try:

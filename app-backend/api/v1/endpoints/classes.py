@@ -113,6 +113,7 @@ class ClassDashboard(BaseModel):
     class_code: str
     textbooks: List[TextbookBrief]
     students: List[StudentBrief]
+    pending_count: int = 0
 
     class Config:
         from_attributes = True
@@ -123,7 +124,7 @@ class DashboardResponse(BaseModel):
 
 
 class MyClassResponse(BaseModel):
-    """\u5b66\u751f\u4e2a\u4eba\u73ed\u7ea7\u5217\u8868\u89c6\u56fe"""
+    """学生个人班级列表视图"""
     application_id: int
     class_id: int
     class_name: str
@@ -256,6 +257,15 @@ async def teacher_dashboard(
             and link.student.deleted_at is None
         ]
 
+        # 统计待审批申请人数
+        pending_count = len([
+            link for link in cls.student_links
+            if link.deleted_at is None
+            and link.status == StudentClassStatus.PENDING
+            and link.student
+            and link.student.deleted_at is None
+        ])
+
         dashboard_classes.append(
             ClassDashboard(
                 id=cls.id,
@@ -263,6 +273,7 @@ async def teacher_dashboard(
                 class_code=cls.class_code,
                 textbooks=textbooks,
                 students=students,
+                pending_count=pending_count,
             )
         )
 
@@ -344,12 +355,35 @@ async def join_class(
         db, student_id=current_user.id, class_id=course_class.id
     )
 
+    # ── 新增：向该班级的教师发送系统通知 ──────────────────────────────
+    try:
+        from crud import crud_notification
+        await crud_notification.create(
+            db,
+            obj_in={
+                "sender_id": current_user.id,
+                "receiver_id": course_class.teacher_id,
+                "title": "新的入班申请",
+                "content": f"学生 {current_user.username} 申请加入您的班级《{course_class.name}》，请尽快审批。",
+                "is_read": False
+            }
+        )
+    except Exception as e:
+        logger.error("Failed to send join class notification: %s", e)
+
+    # 清除教师数据看板的 Redis 缓存，保证小红点能实时刷新
+    try:
+        from core.redis import redis_client
+        await redis_client.delete(f"cache:teacher_dashboard:{course_class.teacher_id}")
+    except Exception as e:
+        logger.warning("Failed to delete teacher dashboard cache on student join: %s", e)
+
     return {
         "application_id": application.id,
         "class_id": course_class.id,
         "class_name": course_class.name,
         "status": application.status,
-        "message": "申请已提交，请等待教师审批",
+        "message": "申请已提交，请等待教师审批并已通知教师",
     }
 
 
@@ -409,11 +443,26 @@ async def review_applications(
     - 只有属于当前教师班级且处于 PENDING 状态的申请才会被更新。
     - 返回实际更新的条数。
     """
-    await _get_class_owned_by_teacher(class_id, current_user, db)
+    course_class = await _get_class_owned_by_teacher(class_id, current_user, db)
 
     new_status = (
         StudentClassStatus.APPROVED if body.action == "approve" else StudentClassStatus.REJECTED
     )
+
+    # ── 新增：在更新前，查询所有实际会被更新的申请记录的学生 ID，用于发送通知 ──
+    from sqlalchemy import select
+    from db.models.relations import StudentClass
+    student_query = (
+        select(StudentClass.student_id)
+        .where(
+            StudentClass.id.in_(body.application_ids),
+            StudentClass.class_id == class_id,
+            StudentClass.status == StudentClassStatus.PENDING,
+            StudentClass.deleted_at.is_(None),
+        )
+    )
+    student_result = await db.execute(student_query)
+    student_ids = list(student_result.scalars().all())
 
     # 单条 SQL 批量更新，一次事务提交，避免 N 次 commit 导致的部分提交风险
     updated_count = await crud_student_class.bulk_update_status(
@@ -422,6 +471,25 @@ async def review_applications(
         class_id=class_id,
         new_status=new_status,
     )
+
+    # ── 新增：批量发送审核通知给对应学生 ──────────────────────────────────────
+    if student_ids:
+        try:
+            from crud import crud_notification
+            action_text = "同意" if body.action == "approve" else "拒绝"
+            for sid in student_ids:
+                await crud_notification.create(
+                    db,
+                    obj_in={
+                        "sender_id": current_user.id,
+                        "receiver_id": sid,
+                        "title": "入班申请审核结果",
+                        "content": f"您申请加入班级《{course_class.name}》的申请已被教师{action_text}。",
+                        "is_read": False,
+                    }
+                )
+        except Exception as e:
+            logger.error("Failed to send review applications notifications: %s", e)
 
     # ── 失效看板缓存 ──────────────────────────────────────────────────────────
     try:
@@ -471,6 +539,56 @@ async def remove_student_from_class(
         )
         action_desc = "申请已拒绝"
     else:
+        # ── 软删除该学生在此班级下授权，且未在其他班级授权的所有教材的 ChatSession ──
+        from sqlalchemy import select
+        from db.models.chat import ChatSession
+        
+        ct_query = select(ClassTextbook.textbook_id).where(
+            ClassTextbook.class_id == class_id,
+            ClassTextbook.deleted_at.is_(None)
+        )
+        ct_result = await db.execute(ct_query)
+        bound_textbook_ids = ct_result.scalars().all()
+        
+        if bound_textbook_ids:
+            # 查出学生加入的其他有效班级 ID
+            student_other_classes_query = select(StudentClass.class_id).where(
+                StudentClass.student_id == student_id,
+                StudentClass.class_id != class_id,
+                StudentClass.status == StudentClassStatus.APPROVED,
+                StudentClass.deleted_at.is_(None)
+            )
+            other_classes_result = await db.execute(student_other_classes_query)
+            other_class_ids = other_classes_result.scalars().all()
+            
+            active_textbook_ids = set()
+            if other_class_ids:
+                active_ct_query = select(ClassTextbook.textbook_id).where(
+                    ClassTextbook.class_id.in_(other_class_ids),
+                    ClassTextbook.textbook_id.in_(bound_textbook_ids),
+                    ClassTextbook.deleted_at.is_(None)
+                )
+                active_ct_result = await db.execute(active_ct_query)
+                active_textbook_ids = set(active_ct_result.scalars().all())
+                
+            textbooks_to_cleanup = [tid for tid in bound_textbook_ids if tid not in active_textbook_ids]
+            
+            if textbooks_to_cleanup:
+                sessions_query = select(ChatSession).where(
+                    ChatSession.textbook_id.in_(textbooks_to_cleanup),
+                    ChatSession.student_id == student_id,
+                    ChatSession.deleted_at.is_(None)
+                )
+                sessions_result = await db.execute(sessions_query)
+                for sess in sessions_result.scalars().all():
+                    sess.soft_delete()
+                    db.add(sess)
+                await db.commit()
+                logger.info(
+                    "Soft-deleted student %d's sessions of textbooks %s because of removal from class %d",
+                    student_id, textbooks_to_cleanup, class_id
+                )
+            
         await crud_student_class.remove(db, id=student_class_record.id)
         action_desc = "已成功将学生移除该班级"
 
@@ -531,21 +649,43 @@ async def disband_class(
     for ct in ct_list:
         await crud_class_textbook.remove(db, id=ct.id)
 
-    # 3. 软删除该班级下学生在该教材下的 ChatSession，防止列表中出现失效会话
+    # 3. 软删除该班级下学生因失去该教材授权而失效的 ChatSession（防止列表中出现失效会话）
     if affected_textbook_ids and student_ids:
+        still_authorized_query = select(
+            StudentClass.student_id,
+            ClassTextbook.textbook_id
+        ).join(
+            ClassTextbook,
+            StudentClass.class_id == ClassTextbook.class_id
+        ).where(
+            StudentClass.student_id.in_(student_ids),
+            StudentClass.status == StudentClassStatus.APPROVED,
+            StudentClass.class_id != course_class.id,
+            StudentClass.deleted_at.is_(None),
+            ClassTextbook.textbook_id.in_(affected_textbook_ids),
+            ClassTextbook.deleted_at.is_(None)
+        )
+        still_authorized_result = await db.execute(still_authorized_query)
+        still_authorized_pairs = {
+            (row[0], row[1]) for row in still_authorized_result.all()
+        }
+
         sessions_query = select(ChatSession).where(
             ChatSession.textbook_id.in_(affected_textbook_ids),
             ChatSession.student_id.in_(student_ids),
             ChatSession.deleted_at.is_(None),
         )
         sessions_result = await db.execute(sessions_query)
+        deleted_count = 0
         for sess in sessions_result.scalars().all():
-            sess.soft_delete()
-            db.add(sess)
+            if (sess.student_id, sess.textbook_id) not in still_authorized_pairs:
+                sess.soft_delete()
+                db.add(sess)
+                deleted_count += 1
         await db.commit()
         logger.info(
-            "Soft-deleted chat sessions of disbanded class %d for students %s (textbooks: %s)",
-            course_class.id, student_ids, affected_textbook_ids,
+            "Soft-deleted %d chat sessions of disbanded class %d for students %s (textbooks: %s)",
+            deleted_count, course_class.id, student_ids, affected_textbook_ids,
         )
 
     # 4. 软删除班级主记录
@@ -591,6 +731,57 @@ async def quit_class(
     # 获取 teacher_id 以失效看板缓存
     course_class = await crud_class.get(db, id=class_id)
     teacher_id = course_class.teacher_id if course_class else None
+
+    # 仅当学生是 APPROVED（已批准成员）退出时，才清理会话
+    if student_class_record.status == StudentClassStatus.APPROVED:
+        # ── 软删除该学生退出班级后失去授权的教材的 ChatSession ──
+        from sqlalchemy import select
+        from db.models.chat import ChatSession
+        
+        ct_query = select(ClassTextbook.textbook_id).where(
+            ClassTextbook.class_id == class_id,
+            ClassTextbook.deleted_at.is_(None)
+        )
+        ct_result = await db.execute(ct_query)
+        bound_textbook_ids = ct_result.scalars().all()
+        
+        if bound_textbook_ids:
+            student_other_classes_query = select(StudentClass.class_id).where(
+                StudentClass.student_id == current_user.id,
+                StudentClass.class_id != class_id,
+                StudentClass.status == StudentClassStatus.APPROVED,
+                StudentClass.deleted_at.is_(None)
+            )
+            other_classes_result = await db.execute(student_other_classes_query)
+            other_class_ids = other_classes_result.scalars().all()
+            
+            active_textbook_ids = set()
+            if other_class_ids:
+                active_ct_query = select(ClassTextbook.textbook_id).where(
+                    ClassTextbook.class_id.in_(other_class_ids),
+                    ClassTextbook.textbook_id.in_(bound_textbook_ids),
+                    ClassTextbook.deleted_at.is_(None)
+                )
+                active_ct_result = await db.execute(active_ct_query)
+                active_textbook_ids = set(active_ct_result.scalars().all())
+                
+            textbooks_to_cleanup = [tid for tid in bound_textbook_ids if tid not in active_textbook_ids]
+            
+            if textbooks_to_cleanup:
+                sessions_query = select(ChatSession).where(
+                    ChatSession.textbook_id.in_(textbooks_to_cleanup),
+                    ChatSession.student_id == current_user.id,
+                    ChatSession.deleted_at.is_(None)
+                )
+                sessions_result = await db.execute(sessions_query)
+                for sess in sessions_result.scalars().all():
+                    sess.soft_delete()
+                    db.add(sess)
+                await db.commit()
+                logger.info(
+                    "Soft-deleted student %d's sessions of textbooks %s because of quitting class %d",
+                    current_user.id, textbooks_to_cleanup, class_id
+                )
 
     await crud_student_class.remove(db, id=student_class_record.id)
     

@@ -20,6 +20,10 @@ class UserResponse(BaseModel):
     email: str
     role: UserRole
     status: UserStatus
+    real_name: Optional[str] = None
+    school_name: Optional[str] = None
+    credential_code: Optional[str] = None
+    credential_image_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -253,6 +257,16 @@ async def delete_textbook(
                 "Failed to delete ChromaDB collection '%s' for textbook %d: %s",
                 chroma_collection_id, textbook_id, e
             )
+
+    # ── 清理 FTS5 全文索引记录，防存储泄露 ─────────────────────────────────
+    try:
+        from services.rag_optimizer import FTSIndexManager
+        import logging
+        FTSIndexManager.delete_document_chunks(textbook_id)
+        logging.getLogger(__name__).info("Deleted SQLite FTS5 records for textbook ID: %d", textbook_id)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Failed to delete SQLite FTS5 records for textbook %d: %s", textbook_id, e)
     
     # 向教师发送系统通知
     from db.models.notification import Notification
