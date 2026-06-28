@@ -177,6 +177,12 @@ class RAGService:
             )
             condensed = response.choices[0].message.content.strip()
             condensed = condensed.replace('"', '').replace("'", "").strip()
+            
+            # 清理可能携带的模型对话前缀噪声，确保检索关键词纯净
+            for prefix in ["重写后的独立搜索词：", "重写后的独立搜索词:", "重写后的搜索词：", "重写后的搜索词:", "重写：", "重写:"]:
+                if condensed.startswith(prefix):
+                    condensed = condensed[len(prefix):].strip()
+                    
             if condensed:
                 logger.info("RAG Query Condensed: '%s' -> '%s'", user_query, condensed)
                 return condensed

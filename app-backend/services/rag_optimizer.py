@@ -114,8 +114,8 @@ class FTSIndexManager:
         if not words:
             return []
         
-        # 2. 用 OR 拼接多词匹配，提高稀疏检索召回率
-        match_expression = " OR ".join(words)
+        # 2. 用 OR 拼接多词匹配，并启用前缀通配符匹配（*）以大幅提高中英文的检索召回率
+        match_expression = " OR ".join([f"{w}*" for w in words])
         
         cls.init_db()
         conn = cls._get_connection()
@@ -296,12 +296,16 @@ class Reranker:
             )
             content = res.choices[0].message.content.strip()
             
-            # 防御式清洗 markdown 包裹语法（有些 LLM 仍会倔强输出 ```json）
-            if content.startswith("```"):
-                content = content.replace("```json", "").replace("```", "").strip()
-            
-            # 解析编号数组
-            indices = json.loads(content)
+            # 使用正则匹配精准提取 JSON 数组，过滤任何前置文字、后置文字或 Markdown 语法
+            import re
+            match = re.search(r"\[\s*\d+\s*(?:,\s*\d+\s*)*\]", content)
+            if match:
+                indices = json.loads(match.group(0))
+            else:
+                # 兜底旧版清洗流程
+                if content.startswith("```"):
+                    content = content.replace("```json", "").replace("```", "").strip()
+                indices = json.loads(content)
             if isinstance(indices, list):
                 reranked = []
                 seen_idx = set()

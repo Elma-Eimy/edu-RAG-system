@@ -136,7 +136,7 @@ class DocumentParser:
 
         for page_dict in pages:
             page_text = page_dict.get("text", "")
-            # PyMuPDF metadata page_number is 1-indexed directly
+            # PyMuPDF 元数据中的 page_number 直接就是从 1 开始索引的
             page_num = page_dict.get("metadata", {}).get("page_number", 1)
             
             lines = page_text.splitlines()

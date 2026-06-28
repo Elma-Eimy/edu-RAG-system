@@ -128,7 +128,7 @@ class AIService:
                 tasks = [_call_single(text, client) for text in texts]
                 return await asyncio.gather(*tasks)
 
-        # If model name contains "vision" directly or is a custom multimodal endpoint prefix "ep-m-", use multimodal API
+        # 如果模型名称直接包含 "vision" 或为自定义多模态端点前缀 "ep-m-"，则使用多模态 API
         if "vision" in model_name.lower() or "ep-m-" in model_name.lower():
             try:
                 return await _call_multimodal()
@@ -137,7 +137,7 @@ class AIService:
                 logging.getLogger(__name__).warning("Multimodal Embedding API failed, using fallback: %s", e)
                 return self._generate_fallback_embeddings(texts)
         else:
-            # Try standard text API first
+            # 首先尝试标准的文本 API
             try:
                 response = await self.embedding_client.embeddings.create(
                     input=texts,
@@ -146,7 +146,7 @@ class AIService:
                 return [data.embedding for data in response.data]
             except Exception as e:
                 err_str = str(e).lower()
-                # If error indicates it's actually a vision/multimodal model, retry using multimodal API
+                # 如果报错信息表明它实际上是视觉/多模态模型，则重试使用多模态 API
                 if "does not support this api" in err_str or "vision" in err_str or "multimodal" in err_str:
                     import logging
                     logging.getLogger(__name__).info("Text API returned model mismatch. Retrying via Multimodal API...")
