@@ -99,7 +99,7 @@ app-backend/
 
 ## 核心功能
 
-### 🎓 角色体系
+### 角色体系
 系统支持三种用户角色，通过 JWT 载荷中的 `role` 字段区分：
 
 | 角色 | 说明 |
@@ -108,24 +108,24 @@ app-backend/
 | `teacher` | 创建班级、上传教材、管理学生、审批申请、审计学生对话 |
 | `admin` | 用户管理、强制删除内容、系统配置、广播通知 |
 
-### 📚 教材解析 RAG 链路
+### 教材解析 RAG 链路
 1. 教师上传 PDF → 写入数据库（`status=PENDING`）
-2. Celery Worker 后台解析：PDF 物理提取（PyMuPDF4LLM）→ OCR 兜底（PaddleOCR）→ **层级父上下文切片（Hierarchical Parent-Context Chunking，自动解析段落标题层级并前置嵌入子块，保障小分块检索不失焦）** → Embedding → 写入 ChromaDB 向量集合 + SQLite FTS5 全文索引（修正了 `page_number` 1-indexed 的正确页码字段抽取）
+2. Celery Worker 后台解析：PDF 物理提取（PyMuPDF4LLM）→ OCR 兜底（PaddleOCR）→ 段落标题层级切片与前置嵌套（保障检索时的上下文关联） → Embedding → 写入 ChromaDB 向量集合 + SQLite FTS5 全文索引（修正了 `page_number` 1-indexed 的正确页码字段抽取）
 3. 前端轮询 `/textbooks/{id}/status` 直到 `success`
 
-### 💬 SSE 流式问答
+### SSE 流式问答
 ```
 用户提问
   → 实时鉴权（是否仍有权限访问该教材）
   → 写入 user 消息
-  → 多轮对话上下文检索提炼（Conversational Query Condensation，利用极速 LLM 对前序轮次与当前追问进行提炼生成 Standalone Search Query，避免追问或指代代词导致 RAG 检索跑偏）
-  → 双路检索（ChromaDB 向量 + FTS5 全文）→ 候选块重排（RRF 倒数排名融合 / LLM 启发式重排 / Cohere，修复了单项重排时的退化边界 Bug）
+  → 多轮对话上下文检索提炼（利用 LLM 提炼生成 Standalone Search Query，避免追问导致 RAG 检索偏差）
+  → 双路检索（ChromaDB 向量 + FTS5 全文）→ 候选块重排（RRF 倒数排名融合 / LLM 启发式重排 / Cohere）
   → 构建 messages 载荷（灵活系统提示词与注入指令：优先采用教材事实并标明出处页码，教材缺失时允许利用自身专业知识库进行补充拓展，但绝对不得与教材原文相违背）
   → 流式调用 LLM → SSE 推送 token
   → 流结束写入 AI 消息 → （可选）触发摘要压缩 Celery 任务
 ```
 
-### 🏫 班级流转
+### 班级流转
 - 教师创建班级（生成 6 位 `class_code`）
 - 学生凭 `class_code` 申请加入（支持退出/被踢后重新申请，幂等设计）
 - 教师批量审批（单次 SQL，原子事务）
@@ -133,151 +133,120 @@ app-backend/
 
 ---
 
-## 快速开始
+## Windows 本地调试与运行说明
 
-### 环境要求
+本部分详细介绍在 Windows 环境下如何快速搭建、配置并运行本系统的后端服务，以便老师或开发人员进行测试。
 
-- Python 3.11+
-- MySQL 8.0+
-- Redis 6.0+
-- （可选）PaddleOCR 需要 CUDA 或 CPU 模式
+### 1. 本地环境准备
 
-### 1. 克隆并安装依赖
-
-```bash
-# 创建虚拟环境
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
-# 安装依赖
-pip install -r requirements.txt
-```
-
-### 2. 配置环境变量
-
-复制 `.env.example` 为 `.env`（若无则手动创建）并填写以下必填项：
-
-```env
-# JWT 签名密钥（必填！用 openssl rand -hex 32 生成）
-SECRET_KEY=<your_secret_key>
-
-# 数据库密码
-MYSQL_PASSWORD=<your_mysql_password>
-
-# 大语言模型 API Key
-LLM_API_KEY=<your_llm_api_key>
-
-# Embedding 模型 API Key
-EMBEDDING_API_KEY=<your_embedding_api_key>
-
-# 允许的前端来源（CORS）
-ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
-```
-
-> ⚠️ **安全提醒**：`.env` 文件已加入 `.gitignore`，切勿提交至版本控制。
-
-### 3. 配置非敏感参数
-
-在 `config.yaml` 中调整模型名称、数据库地址、RAG 参数等：
-
-```yaml
-llm:
-  openai:
-    base_url: "https://api.openai.com/v1"   # 替换为自己的 API 网关地址
-    model_name: "gpt-4o"
-
-database:
-  mysql:
-    host: localhost
-    port: 3306
-    db: edu_system
-```
+在开始之前，请确保您的 Windows 电脑已安装以下基础环境：
+- **Python 3.11**（推荐使用 3.11 版本。安装时请务必勾选 **"Add Python to PATH"**，否则终端无法识别 `python` 命令）
+- **关系型数据库 MySQL 8.0+**（推荐使用常规安装，或使用 **XAMPP / phpStudy (小皮面板)** 快速启动 MySQL 数据库服务）
+- **缓存与消息队列 Redis**（在 Windows 下可以使用 Redis-Windows 版本，或直接下载 Windows 绿色的 Redis 二进制压缩包运行）
 
 ---
 
-## 配置说明
+### 2. 数据库与 Redis 启动配置
 
-配置系统采用 **三层优先级**（高优先级覆盖低优先级）：
+#### 2.1 MySQL 数据库初始化
+1. 启动本地 MySQL 服务。
+2. 使用 Navicat、SQLyog 等可视化工具（或在命令行）连接数据库，并手动创建一个名为 `edu_system` 的空数据库：
+   ```sql
+   CREATE DATABASE edu_system CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+   ```
 
-```
-config_override.json（运行时动态覆写，由 /admin/config 接口写入）
-       ↓
-.env（敏感配置：密钥、密码、API Key）
-       ↓
-config.yaml（非敏感配置：数据库地址、模型参数）
-       ↓
-core/config.py 中的代码默认值
-```
-
-### 主要配置项一览
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `SECRET_KEY` | JWT 签名密钥，**必须在 .env 中设置** | — |
-| `MYSQL_PASSWORD` | 数据库密码 | — |
-| `LLM_API_KEY` | 大模型 API Key | — |
-| `LLM_BASE_URL` | 大模型 API 网关地址 | `https://api.openai.com/v1` |
-| `LLM_MODEL_NAME` | 对话模型名称 | `gpt-4o` |
-| `EMBEDDING_MODEL_NAME` | Embedding 模型名称 | `text-embedding-3-small` |
-| `RERANK_MODE` | 重排模式：`none` / `llm` / `cohere` | `llm` |
-| `RAG_TOP_K` | 最终注入 Prompt 的检索块数 | `4` |
-| `CHAT_HISTORY_WINDOW` | 携带的历史对话轮数 | `5` |
-| `MAX_UPLOAD_MB` | 单次 PDF 上传大小限制（MB） | `50` |
-| `ENABLE_HISTORY_SUMMARY` | 是否启用历史摘要压缩（节省 Token） | `false` |
-| `ALLOWED_ORIGINS` | CORS 白名单，多个用英文逗号分隔 | `http://localhost:5173` |
+#### 2.2 Redis 启动
+1. 进入您的 Redis 解压目录，在命令行中执行以下命令以启动 Redis 服务：
+   ```cmd
+   redis-server.exe
+   ```
+   *（启动后保持该命令行窗口不要关闭，默认监听端口为 6379）*
 
 ---
 
-## 数据库迁移
+### 3. 后端依赖安装
 
+1. **进入后端目录**：打开 Windows 终端（如 PowerShell 或 CMD），进入 `app-backend` 根目录。
+2. **创建并激活 Python 虚拟环境**：
+   - **使用 PowerShell**：
+     ```powershell
+     python -m venv .venv
+     .venv\Scripts\Activate.ps1
+     ```
+   - **使用 CMD**：
+     ```cmd
+     python -m venv .venv
+     .venv\Scripts\activate.bat
+     ```
+     *(激活成功后，命令行提示符最前面会出现 `(.venv)` 标志)*
+3. **安装依赖包**：
+   ```bash
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+   > 💡 **小贴士**：因依赖包含 OCR 文字识别库 `paddleocr`，若安装速度缓慢，可使用国内镜像源加速：
+   > `pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple`
+
+---
+
+### 4. 环境变量与配置文件设置
+
+1. **敏感与本地密码配置 (`.env`)**：
+   在 `app-backend` 根目录下手动新建一个文件，命名为 **`.env`**。写入以下内容（请根据您的实际数据库密码、API Key 修改）：
+   ```env
+   # JWT 签名密钥（可用做测试默认值，或命令行运行 openssl rand -hex 32 生成）
+   SECRET_KEY=f32f4e1859e77ffde529c2b3901b673af08badc0505d8322e725345559dd1908
+
+   # 本地 MySQL 数据库密码（请修改为您的实际 MySQL 连接密码）
+   MYSQL_PASSWORD=your_mysql_password
+
+   # 大语言模型 API 密钥（可替换为您所用服务商的真实 API Key，如 DeepSeek、OpenAI）
+   LLM_API_KEY=sk-...
+
+   # Embedding 向量化模型 API 密钥（如不需要重写，可以直接使用与 LLM 相同的 Key）
+   EMBEDDING_API_KEY=ark-...
+
+   # 跨域允许的前端源列表（开发环境下，默认指向前端的启动端口 5173）
+   ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://127.0.0.1:3000
+   ```
+
+2. **系统模型与常规配置 (`config.yaml`)**：
+   在 `config.yaml` 中，您可以根据实际需求调整：
+   - 本地 MySQL 连接信息（默认地址为 `localhost:3306`）。
+   - 大语言模型的网关地址及调用的模型名称（`llm.openai.base_url`、`llm.openai.model_name` 等）。
+
+---
+
+### 5. 执行数据库初始化迁移
+
+在已激活虚拟环境的终端中，运行 Alembic 指令以在 MySQL 中自动建立数据表结构：
 ```bash
-# 初始化数据库（首次运行）
 alembic upgrade head
-
-# 修改 ORM 模型后，自动生成迁移文件
-alembic revision --autogenerate -m "describe your change"
-
-# 应用最新迁移
-alembic upgrade head
-
-# 回滚一个版本
-alembic downgrade -1
 ```
+运行完成后，`edu_system` 数据库中会自动创建 `users`、`course_class`、`textbook`、`chat_session` 等多张实体数据表。
 
 ---
 
-## 启动服务
+### 6. 一键启动后端服务进行测试
 
-### 开发环境
+为了使系统正常运转，在 Windows 本地测试时，需要同时运行 **Web 接口服务** 与 **Celery 异步队列**：
 
+#### 步骤一：启动 FastAPI API 服务
+新开一个终端窗口，激活虚拟环境后运行：
 ```bash
-# 启动 FastAPI 开发服务器（支持热重载）
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+- 服务启动后，通过浏览器访问 `http://localhost:8000/docs` 即可进入交互式 API 文档页面（Swagger UI），能直接在网页上进行接口功能测试。
 
-# 新开终端：启动 Celery Worker（处理教材解析、摘要等异步任务）
+#### 步骤二：启动 Celery 异步队列 (Windows 注意事项)
+由于 Windows 的默认并发机制与 Celery 内部设计在进程复用上存在兼容问题，**如果不加额外参数，在 Windows 上上传 PDF 后后台任务将会卡死或报错**。
+因此，在 Windows 上启动 Celery Worker，**必须强制加上 `-P solo` 参数**（即串行执行模式）：
+
+新开一个终端窗口，激活虚拟环境后运行：
+```bash
 celery -A worker.celery_app worker --loglevel=info -P solo
 ```
-
-> 💡 Windows 上 Celery 需加 `-P solo`（不支持 fork 进程模型）
-
-### 访问 API 文档
-
-| 工具 | 地址 |
-|------|------|
-| Swagger UI | http://localhost:8000/api/v1/openapi.json |
-| 内置 Docs | http://localhost:8000/docs |
-| ReDoc | http://localhost:8000/redoc |
-
-### 生产环境建议
-
-```bash
-# 使用 Gunicorn + Uvicorn worker 多进程部署
-gunicorn main:app -k uvicorn.workers.UvicornWorker \
-  --workers 4 --bind 0.0.0.0:8000
-
-# Celery 多进程（Linux/macOS）
-celery -A worker.celery_app worker --loglevel=info --concurrency=4
-```
+*(保持此窗口不要关闭，当教师上传教材 PDF 后，该窗口将显示 PDF 文本提取、段落标题语义切片与向量库入库的进度日志)*
 
 ---
 
@@ -346,24 +315,24 @@ Token 通过 `POST /api/v1/users/login/access-token` 获取，有效期默认 **
 
 ## 注意事项
 
-### 🔐 安全
+### 安全
 - `.env` 文件包含 `SECRET_KEY`、数据库密码、API Key 等敏感信息，**绝对不能提交到版本控制**
 - `SECRET_KEY` 为空时服务启动会直接抛出 `RuntimeError` 阻止启动
 - 全局异常 Handler 不会将 SQL 语句、表名等内部信息返回给客户端，仅记录到日志
 
-### 📁 文件存储
+### 文件存储
 - PDF 文件默认存储在 `./uploads/textbooks/YYYY/MM/` 下，生产环境建议挂载独立磁盘或替换为对象存储（OSS / COS）
 - 软删除教材时会同步物理删除 PDF 文件，**不可恢复**
 
-### 🔄 软删除
+### 软删除
 - 所有主要实体均采用软删除（`deleted_at` 时间戳），查询时自动过滤
 - 中间表（`ClassTextbook`、`StudentClass`）的软删除与唯一约束通过 `create_or_restore` 幂等方法处理，支持解绑后重绑、退出后重新申请
 
-### ⚡ Celery Worker
+### Celery Worker
 - 教材上传后 Celery 任务不可达时不影响 HTTP 响应，可通过 `POST /textbooks/{id}/reprocess` 手动重触发
 - Windows 开发环境必须使用 `-P solo` 单进程模式启动 Celery
 
-### 📝 日志
+### 日志
 - 应用日志通过标准 `logging` 输出，建议生产环境接入日志采集系统（如 ELK、Loki 等）
 - 所有异常均在 `core/exceptions.py` 的全局 Handler 中记录 `exception` 级别日志
 

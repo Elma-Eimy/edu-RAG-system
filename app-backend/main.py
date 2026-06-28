@@ -50,6 +50,11 @@ def create_app() -> FastAPI:
     from api.v1.api import api_router
     app.include_router(api_router, prefix=settings.API_V1_STR)
 
+    # 挂载静态文件目录以提供教材下载与教师证件照访问功能
+    import os
+    from fastapi.staticfiles import StaticFiles
+    os.makedirs("uploads", exist_ok=True)
+    app.mount("/static", StaticFiles(directory="uploads"), name="static")
 
     return app
 
