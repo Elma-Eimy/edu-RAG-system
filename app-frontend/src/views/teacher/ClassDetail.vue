@@ -168,17 +168,6 @@ const showConfirmKick = ref(false)
 const studentToKick = ref(null)
 const globalMessage = ref(null)
 
-// Default Mock Data for local workspace demonstration
-const mockStudents = [
-  { student_id: 10, username: 'lisi', email: 'lisi@example.com' },
-  { student_id: 11, username: 'wangwu', email: 'wangwu@example.com' }
-]
-
-const mockApplications = [
-  { application_id: 107, student_id: 12, student_username: 'zhaoliu', email: 'zhaoliu@example.com', status: 'pending' },
-  { application_id: 108, student_id: 13, student_username: 'tianqi', email: 'tianqi@example.com', status: 'pending' }
-]
-
 const alertClass = computed(() => {
   if (!globalMessage.value) return ''
   return globalMessage.value.type === 'success' ? 'alert-success' : 'alert-danger'
@@ -196,9 +185,8 @@ const loadClassDetails = async () => {
       students.value = currentCls.students || []
     }
   } catch (error) {
-    className.value = classId === 1 ? '高等数学 A 班' : '线性代数 B 班'
-    classCode.value = classId === 1 ? 'AB12CD' : 'XY99ZZ'
-    students.value = [...mockStudents]
+    showErrorToast(error.message || '获取班级成员失败。')
+    students.value = []
   }
 
   // Load applications list
@@ -206,7 +194,8 @@ const loadClassDetails = async () => {
     const appsRes = await api.get(`/classes/${classId}/applications?filter_status=pending`)
     pendingApplications.value = appsRes
   } catch (error) {
-    pendingApplications.value = [...mockApplications]
+    showErrorToast(error.message || '获取待审批申请失败。')
+    pendingApplications.value = []
   }
 }
 
@@ -252,28 +241,7 @@ const handleBulkReview = async (action) => {
     selectedAppIds.value = []
     loadClassDetails()
   } catch (error) {
-    // Sandbox simulation update
-    if (action === 'approve') {
-      // Move selected applications to active roster
-      selectedAppIds.value.forEach(appId => {
-        const matched = pendingApplications.value.find(a => a.application_id === appId)
-        if (matched) {
-          students.value.push({
-            student_id: matched.student_id,
-            username: matched.student_username,
-            email: matched.email || `${matched.student_username}@smartedu.edu`
-          })
-        }
-      })
-    }
-
-    // Filter out approved/rejected applications from pending lists
-    pendingApplications.value = pendingApplications.value.filter(
-      a => !selectedAppIds.value.includes(a.application_id)
-    )
-
-    showSuccessToast(`成功批量${action === 'approve' ? '同意' : '拒绝'}了 ${originalSelectedCount} 位学生的申请（模拟沙盒拦截模式）。`)
-    selectedAppIds.value = []
+    showErrorToast(error.message || `批量${action === 'approve' ? '审批同意' : '审批拒绝'}失败。`)
   }
 }
 
@@ -297,9 +265,7 @@ const handleKickStudent = async () => {
     students.value = students.value.filter(s => s.student_id !== sId)
     showSuccessToast('已成功将该学生移出班级。')
   } catch (error) {
-    // Sandbox removal
-    students.value = students.value.filter(s => s.student_id !== sId)
-    showSuccessToast('已成功移出班级学生（模拟沙盒拦截模式）。')
+    showErrorToast(error.message || '将学生移出班级失败。')
   } finally {
     closeConfirmKick()
   }
@@ -308,6 +274,13 @@ const handleKickStudent = async () => {
 // Toast alerts helper
 const showSuccessToast = (text) => {
   globalMessage.value = { type: 'success', text }
+  setTimeout(() => {
+    globalMessage.value = null
+  }, 4000)
+}
+
+const showErrorToast = (text) => {
+  globalMessage.value = { type: 'error', text }
   setTimeout(() => {
     globalMessage.value = null
   }, 4000)

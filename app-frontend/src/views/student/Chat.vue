@@ -462,9 +462,12 @@ const handleSendMessage = async () => {
     isStreaming: true
   }
   messages.value.push(aiMsg)
+  
+  // 获取推入数组后的响应式代理对象，确保属性修改能触发 Vue 视图更新
+  const reactiveAiMsg = messages.value[messages.value.length - 1]
 
   typewriterQueue = ''
-  startTypewriter(aiMsg)
+  startTypewriter(reactiveAiMsg)
 
   try {
     // Try actual SSE connection over fetch ReadableStream
@@ -484,7 +487,7 @@ const handleSendMessage = async () => {
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}))
-      throw new Error(err.detail || '会话异常，无权使用当前教材进行对话。')
+      throw new Error(err.msg || err.detail || '会话异常，无权使用当前教材进行对话。')
     }
 
     const reader = response.body.getReader()
@@ -515,13 +518,13 @@ const handleSendMessage = async () => {
             
             // 1. 如果是推理/思考内容，追加到推理字段，并维持 isThinking 为 true
             if (parsed.reasoning) {
-              aiMsg.isThinking = true
-              aiMsg.reasoning_content += parsed.reasoning
+              reactiveAiMsg.isThinking = true
+              reactiveAiMsg.reasoning_content += parsed.reasoning
               scrollToBottom()
             } 
             // 2. 如果是正文内容，追加到 typewriterQueue 进行平滑输出，并将 isThinking 标记为 false（思考完毕）
             else if (parsed.content) {
-              aiMsg.isThinking = false
+              reactiveAiMsg.isThinking = false
               typewriterQueue += parsed.content
             } else if (parsed.error) {
               throw new Error(parsed.error)
@@ -533,13 +536,13 @@ const handleSendMessage = async () => {
       }
     }
   } catch (error) {
-    if (!aiMsg.content && !aiMsg.reasoning_content) {
-      messages.value = messages.value.filter(m => m.id !== aiMsg.id)
+    if (!reactiveAiMsg.content && !reactiveAiMsg.reasoning_content) {
+      messages.value = messages.value.filter(m => m.id !== reactiveAiMsg.id)
     }
     showErrorToast(error.message || '发送消息失败，请检查网络或后端状态。')
   }
 
-  aiMsg.isStreaming = false
+  reactiveAiMsg.isStreaming = false
   streaming.value = false
 }
 

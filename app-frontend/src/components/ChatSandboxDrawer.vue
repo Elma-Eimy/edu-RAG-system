@@ -167,7 +167,7 @@ watch(() => props.show, async (newVal) => {
   }
 })
 
-// Client-side typewriter stream smoothing queue
+// 客户端打字机效果流式平滑处理队列
 let typewriterQueue = ''
 let typewriterInterval = null
 
@@ -217,9 +217,12 @@ const handleSendTestMessage = async () => {
   }
   testMessages.value.push(aiMsg)
   scrollDrawerToBottom()
+  
+  // 获取推入数组后的响应式代理对象，确保属性修改能触发 Vue 视图更新
+  const reactiveAiMsg = testMessages.value[testMessages.value.length - 1]
 
   typewriterQueue = ''
-  startTypewriter(aiMsg)
+  startTypewriter(reactiveAiMsg)
 
   try {
     const response = await fetch(`${api.baseUrl}/chat/stream`, {
@@ -236,7 +239,7 @@ const handleSendTestMessage = async () => {
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}))
-      throw new Error(err.detail || '流式调试对话建立失败。')
+      throw new Error(err.msg || err.detail || '流式调试对话建立失败。')
     }
 
     const reader = response.body.getReader()
@@ -273,12 +276,12 @@ const handleSendTestMessage = async () => {
       }
     }
   } catch (error) {
-    if (!aiMsg.content) {
-      testMessages.value = testMessages.value.filter(m => m.id !== aiMsg.id)
+    if (!reactiveAiMsg.content) {
+      testMessages.value = testMessages.value.filter(m => m.id !== reactiveAiMsg.id)
     }
     console.error('Send test message failed:', error)
   } finally {
-    aiMsg.isStreaming = false
+    reactiveAiMsg.isStreaming = false
     testStreaming.value = false
     scrollDrawerToBottom()
   }

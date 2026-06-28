@@ -130,6 +130,16 @@
                 </td>
                 <td class="actions-col">
                   <div class="action-buttons">
+                    <!-- View Credentials Button -->
+                    <button 
+                      v-if="user.role === 'teacher'"
+                      @click="viewTeacherCredentials(user)" 
+                      class="btn-action view-btn" 
+                      title="查看教师资质证件"
+                    >
+                      <i class="ph ph-eye"></i> 查看资质
+                    </button>
+
                     <!-- Approve Button -->
                     <button 
                       v-if="user.role === 'teacher' && user.status === 'pending'"
@@ -254,6 +264,59 @@
 
     </div>
   </div>
+
+  <!-- Teacher Credentials Preview Modal Overlay -->
+  <transition name="fade">
+    <div class="modal-overlay" v-if="showCredentialModal" @click.self="closeCredentialModal">
+      <div class="modal-card glass-panel animate-zoom">
+        <div class="modal-header">
+          <h3>教师资质证件审核</h3>
+          <button class="close-btn" @click="closeCredentialModal"><i class="ph ph-x"></i></button>
+        </div>
+
+        <div class="credential-details-body" v-if="selectedTeacher">
+          <div class="detail-row">
+            <span class="detail-label">用户账号:</span>
+            <span class="detail-val">{{ selectedTeacher.username }}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">电子邮箱:</span>
+            <span class="detail-val">{{ selectedTeacher.email }}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">真实姓名:</span>
+            <span class="detail-val">{{ selectedTeacher.real_name || '未填' }}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">所执学校:</span>
+            <span class="detail-val">{{ selectedTeacher.school_name || '未填' }}</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">教师证件号:</span>
+            <span class="detail-val"><code>{{ selectedTeacher.credential_code || '未填' }}</code></span>
+          </div>
+          <div class="detail-row img-row">
+            <span class="detail-label">证件照片:</span>
+            <div class="credential-img-container" v-if="selectedTeacher.credential_image_url">
+              <img :src="getFullImageUrl(selectedTeacher.credential_image_url)" alt="证书照片" class="credential-img" />
+            </div>
+            <span class="detail-val text-muted" v-else>未上传照片</span>
+          </div>
+        </div>
+
+        <div class="modal-actions" v-if="selectedTeacher">
+          <button class="btn btn-secondary" @click="closeCredentialModal">关闭</button>
+          <button 
+            v-if="selectedTeacher.status === 'pending'"
+            class="btn btn-primary" 
+            @click="approveTeacherFromModal"
+          >
+            审批通过
+          </button>
+        </div>
+      </div>
+    </div>
+  </transition>
 </template>
 
 <script setup>
@@ -282,6 +345,35 @@ const notificationTitle = ref('')
 const notificationContent = ref('')
 const broadcastLoading = ref(false)
 const broadcastCount = ref(3) // Local seed count
+
+// Teacher Credentials Auditing Modal State
+const showCredentialModal = ref(false)
+const selectedTeacher = ref(null)
+
+const viewTeacherCredentials = (user) => {
+  selectedTeacher.value = user
+  showCredentialModal.value = true
+}
+
+const closeCredentialModal = () => {
+  showCredentialModal.value = false
+  selectedTeacher.value = null
+}
+
+const approveTeacherFromModal = async () => {
+  if (!selectedTeacher.value) return
+  const success = await approveTeacher(selectedTeacher.value)
+  if (success) {
+    closeCredentialModal()
+  }
+}
+
+const getFullImageUrl = (relativeUrl) => {
+  if (!relativeUrl) return ''
+  if (relativeUrl.startsWith('http')) return relativeUrl
+  const base = api.baseUrl.replace(/\/api\/v1\/?$/, '')
+  return `${base}${relativeUrl}`
+}
 
 // Fetch Users list from API
 const fetchUsers = async () => {
@@ -326,6 +418,12 @@ const filteredUsers = computed(() => {
   })
 })
 
+// Stats dashboard computations
+const totalUsers = computed(() => users.value.length)
+const teacherCount = computed(() => users.value.filter(u => u.role === 'teacher').length)
+const studentCount = computed(() => users.value.filter(u => u.role === 'student').length)
+const pendingTeachers = computed(() => users.value.filter(u => u.role === 'teacher' && u.status === 'pending').length)
+
 // Actions: Approve Teacher
 const approveTeacher = async (user) => {
   try {
@@ -335,8 +433,10 @@ const approveTeacher = async (user) => {
       users.value[index] = updatedUser
     }
     showToast('success', `教师 ${user.username} 审批成功。`)
+    return true
   } catch (error) {
     showToast('error', error.message || '审批教师失败。')
+    return false
   }
 }
 
@@ -963,5 +1063,133 @@ const getUserAvatarClass = (role) => {
 .loading-overlay .spinner {
   font-size: 2rem;
   color: var(--color-primary);
+}
+
+/* View Credentials Button */
+.view-btn {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+}
+
+.view-btn:hover {
+  background-color: var(--border-color);
+}
+
+/* Modal Overlay & Card for Admin Console */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(15, 23, 42, 0.3);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+
+.modal-card {
+  width: 90%;
+  max-width: 500px;
+  background-color: var(--bg-card);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-color);
+  padding: 2rem;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 1rem;
+}
+
+.modal-header h3 {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.close-btn {
+  border: none;
+  background: none;
+  font-size: 1.25rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.close-btn:hover {
+  color: var(--text-primary);
+}
+
+.credential-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 400px;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 0.5rem 0;
+  border-bottom: 1px dashed var(--border-color);
+}
+
+.detail-row.img-row {
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.detail-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  min-width: 90px;
+}
+
+.detail-val {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  text-align: right;
+  word-break: break-all;
+}
+
+.credential-img-container {
+  width: 100%;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+  background-color: var(--bg-hover);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 0.5rem;
+}
+
+.credential-img {
+  max-width: 100%;
+  max-height: 200px;
+  object-fit: contain;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  border-top: 1px solid var(--border-color);
+  padding-top: 1rem;
 }
 </style>

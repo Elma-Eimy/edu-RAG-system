@@ -245,3 +245,138 @@ h3 { font-size: 1.25rem; }
   background: var(--text-muted);
 }
 
+/* --- Bubble Markdown & Code Formatting --- */
+.bubble-content p {
+  margin: 0 0 0.5rem 0;
+}
+
+.bubble-content p:last-child {
+  margin-bottom: 0;
+}
+
+.bubble-content ul, 
+.bubble-content ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+
+.bubble-content li {
+  margin-bottom: 0.25rem;
+}
+
+.bubble-content li:last-child {
+  margin-bottom: 0;
+}
+
+.bubble-content code {
+  font-family: Consolas, Monaco, 'Andale Mono', monospace;
+  background-color: rgba(148, 163, 184, 0.18);
+  padding: 0.125rem 0.25rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+  word-break: break-all;
+}
+
+/* User Bubble overrides for inline code */
+.user .bubble-content code {
+  background-color: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+}
+
+/* Code Block Styling */
+.code-block-container {
+  margin: 0.75rem 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  background-color: #1e293b; /* Dark slate slate-800 for code blocks */
+  color: #f8fafc;
+  box-shadow: var(--shadow-sm);
+  line-height: 1.4;
+}
+
+.code-block-header {
+  background-color: #0f172a; /* Slate-900 */
+  padding: 0.35rem 0.75rem;
+  font-size: 0.725rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #94a3b8; /* Slate-400 */
+  border-bottom: 1px solid #334155;
+  user-select: none;
+}
+
+.code-block {
+  margin: 0;
+  padding: 0.75rem;
+  overflow-x: auto;
+  background: transparent;
+}
+
+.code-block code {
+  font-family: Consolas, Monaco, 'Andale Mono', monospace;
+  font-size: 0.8rem;
+  color: inherit;
+  background-color: transparent !important;
+  padding: 0;
+  border-radius: 0;
+  white-space: pre;
+  display: block;
+}
+
+/* Markdown Headers inside bubble */
+.bubble-content h1, 
+.bubble-content h2, 
+.bubble-content h3, 
+.bubble-content h4, 
+.bubble-content h5, 
+.bubble-content h6 {
+  margin: 0.75rem 0 0.5rem 0;
+  font-weight: 600;
+  color: inherit;
+  line-height: 1.3;
+}
+
+.bubble-content h1:first-child,
+.bubble-content h2:first-child,
+.bubble-content h3:first-child {
+  margin-top: 0;
+}
+
+.bubble-content h1 { font-size: 1.15rem; }
+.bubble-content h2 { font-size: 1.05rem; }
+.bubble-content h3 { font-size: 1rem; }
+
+/* Blockquote inside bubble */
+.bubble-content blockquote {
+  margin: 0.5rem 0;
+  padding: 0.25rem 0.75rem;
+  border-left: 3px solid var(--color-primary);
+  background-color: rgba(148, 163, 184, 0.1);
+  color: var(--text-secondary);
+  font-style: italic;
+  border-radius: 0 4px 4px 0;
+}
+
+/* User bubble blockquote override */
+.user .bubble-content blockquote {
+  border-left-color: rgba(255, 255, 255, 0.6);
+  background-color: rgba(255, 255, 255, 0.15);
+  color: #f1f5f9;
+}
+
+/* Horizontal Rule inside bubble */
+.bubble-content hr {
+  border: 0;
+  height: 1px;
+  background-color: var(--border-color);
+  margin: 0.75rem 0;
+}
+
+/* User bubble hr override */
+.user .bubble-content hr {
+  background-color: rgba(255, 255, 255, 0.25);
+}
+
+
+

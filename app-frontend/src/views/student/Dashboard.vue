@@ -160,26 +160,6 @@ const modalLoading = ref(false)
 const modalError = ref(false)
 const globalMessage = ref(null)
 
-// Default Mock Data for immediate offline demonstration
-const mockClasses = [
-  {
-    application_id: 101,
-    class_id: 1,
-    class_name: '高等数学 A 班',
-    class_code: 'AB12CD',
-    teacher_id: 5,
-    application_status: 'approved'
-  },
-  {
-    application_id: 102,
-    class_id: 2,
-    class_name: '线性代数 B 班',
-    class_code: 'XY99ZZ',
-    teacher_id: 6,
-    application_status: 'pending'
-  }
-]
-
 // Alert helper classes
 const alertClass = computed(() => {
   if (!globalMessage.value) return ''
@@ -192,8 +172,8 @@ const fetchClasses = async () => {
     const res = await api.get('/classes/my-classes')
     classes.value = res
   } catch (error) {
-    console.warn('Backend API connection failed, falling back to mock data for student dashboard demonstration.')
-    classes.value = [...mockClasses]
+    showErrorToast(error.message || '获取班级列表失败。')
+    classes.value = []
   }
 }
 
@@ -253,29 +233,7 @@ const handleJoinClass = async () => {
     showSuccessToast(response.message || '申请成功已提交！')
     fetchClasses()
   } catch (error) {
-    // If backend offline or code invalid, do mock fallback
-    if (error.message.includes('请求失败') || error.message.includes('Failed to fetch')) {
-      // Mock validation
-      const alreadyExists = classes.value.some(c => c.class_code === formattedCode)
-      if (alreadyExists) {
-        modalError.value = '您已经申请过该班级，请勿重复申请。'
-      } else {
-        // Successful mock addition
-        const newMock = {
-          application_id: Math.floor(Math.random() * 1000) + 100,
-          class_id: classes.value.length + 1,
-          class_name: `模拟自主班级 ${formattedCode}`,
-          class_code: formattedCode,
-          teacher_id: Math.floor(Math.random() * 10) + 1,
-          application_status: 'pending'
-        }
-        classes.value.push(newMock)
-        closeJoinModal()
-        showSuccessToast('申请已成功提交（模拟沙盒拦截模式）！')
-      }
-    } else {
-      modalError.value = error.message || '申请加入失败，请检查班级码。'
-    }
+    modalError.value = error.message || '申请加入失败，请检查班级码。'
   } finally {
     modalLoading.value = false
   }
@@ -305,9 +263,7 @@ const handleQuitClass = async () => {
     showSuccessToast(isApproved ? '退出班级成功。' : '申请撤销成功。')
     fetchClasses()
   } catch (error) {
-    // Mock simulation deletion
-    classes.value = classes.value.filter(c => c.class_id !== classId)
-    showSuccessToast(isApproved ? '成功退出班级（模拟沙盒拦截模式）。' : '成功撤销申请（模拟沙盒拦截模式）。')
+    showErrorToast(error.message || (isApproved ? '退出班级失败。' : '申请撤销失败。'))
   } finally {
     closeConfirmModal()
   }
@@ -316,6 +272,13 @@ const handleQuitClass = async () => {
 // Display temporary floating Toast alert
 const showSuccessToast = (text) => {
   globalMessage.value = { type: 'success', text }
+  setTimeout(() => {
+    globalMessage.value = null
+  }, 4000)
+}
+
+const showErrorToast = (text) => {
+  globalMessage.value = { type: 'error', text }
   setTimeout(() => {
     globalMessage.value = null
   }, 4000)

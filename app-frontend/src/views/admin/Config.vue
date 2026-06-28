@@ -162,33 +162,33 @@ const alertClass = computed(() => {
   return globalMessage.value.type === 'success' ? 'alert-success' : 'alert-danger'
 })
 
-// Dynamic mask formatter computed property
+// 动态掩码格式化计算属性
 const displayApiKey = computed({
   get() {
-    // If showApiKey eye icon is true OR input is currently focused by user, reveal plaintext
+    // 如果 showApiKey 眼睛图标为真，或者输入框目前被用户聚焦，则显示明文
     if (showApiKey.value || isFocused.value) {
       return rawApiKey.value
     }
     
-    // Mask middle characters permanently (e.g. sk-••••xxxx)
+    // 永久遮罩中间字符（例如 sk-••••xxxx）
     const key = rawApiKey.value
     if (key.length <= 8) return '••••••••'
     return `${key.substring(0, 3)}••••••••${key.substring(key.length - 4)}`
   },
   set(newValue) {
-    // Only update raw value if the key is in plain text editing state
+    // 仅在密钥处于明文编辑状态时才更新原始值
     if (showApiKey.value || isFocused.value) {
       rawApiKey.value = newValue
     }
   }
 })
 
-// Handle input blur to restore mask
+// 处理输入框失焦以恢复遮罩
 const handleBlur = () => {
   isFocused.value = false
 }
 
-// Toggle eye icon status
+// 切换眼睛图标状态
 const toggleEye = () => {
   showApiKey.value = !showApiKey.value
 }

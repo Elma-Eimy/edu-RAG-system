@@ -19,6 +19,11 @@
           <span><i class="ph ph-check-circle"></i></span> {{ successMessage }}
         </div>
       </transition>
+      <transition name="slide-down">
+        <div class="alert alert-success" v-if="codeSuccessMessage">
+          <span><i class="ph ph-check-circle"></i></span> {{ codeSuccessMessage }}
+        </div>
+      </transition>
 
       <!-- Register Form -->
       <form @submit.prevent="handleRegister" class="register-form" v-if="!successMessage">
@@ -64,7 +69,7 @@
 
         <div class="form-group">
           <label class="form-label" for="email">邮箱地址</label>
-          <div class="input-wrapper">
+          <div class="input-wrapper email-send-wrapper">
             <span class="input-icon"><i class="ph ph-envelope"></i></span>
             <input 
               type="email" 
@@ -73,6 +78,32 @@
               class="form-control" 
               placeholder="请输入电子邮箱" 
               required
+              :disabled="loading"
+            />
+            <button 
+              type="button" 
+              class="btn btn-secondary send-code-btn" 
+              @click="sendVerificationCode" 
+              :disabled="loading || countdown > 0 || !email"
+            >
+              {{ countdown > 0 ? `${countdown}s 后重新获取` : '获取验证码' }}
+            </button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="verificationCode">邮箱验证码</label>
+          <div class="input-wrapper">
+            <span class="input-icon"><i class="ph ph-key"></i></span>
+            <input 
+              type="text" 
+              id="verificationCode" 
+              v-model="verificationCode" 
+              class="form-control" 
+              placeholder="请输入 6 位验证码" 
+              required
+              maxlength="6"
+              minlength="6"
               :disabled="loading"
             />
           </div>
@@ -95,7 +126,89 @@
           </div>
         </div>
 
-        <button type="submit" class="btn btn-primary submit-btn" :disabled="loading">
+        <!-- Teacher Specific Fields -->
+        <transition name="fade">
+          <div v-if="role === 'teacher'" class="teacher-fields-group">
+            <div class="form-group">
+              <label class="form-label" for="realName">真实姓名</label>
+              <div class="input-wrapper">
+                <span class="input-icon"><i class="ph ph-identification-card"></i></span>
+                <input 
+                  type="text" 
+                  id="realName" 
+                  v-model="realName" 
+                  class="form-control" 
+                  placeholder="请输入您的真实姓名" 
+                  required
+                  :disabled="loading"
+                />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="schoolName">学校名称</label>
+              <div class="input-wrapper">
+                <span class="input-icon"><i class="ph ph-buildings"></i></span>
+                <input 
+                  type="text" 
+                  id="schoolName" 
+                  v-model="schoolName" 
+                  class="form-control" 
+                  placeholder="请输入您所在的学校名称" 
+                  required
+                  :disabled="loading"
+                />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="credentialCode">工作证号 / 教师资格证号</label>
+              <div class="input-wrapper">
+                <span class="input-icon"><i class="ph ph-number-square-one"></i></span>
+                <input 
+                  type="text" 
+                  id="credentialCode" 
+                  v-model="credentialCode" 
+                  class="form-control" 
+                  placeholder="请输入证件编号" 
+                  required
+                  :disabled="loading"
+                />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">资质证件照片上传</label>
+              <div class="file-upload-wrapper">
+                <input 
+                  type="file" 
+                  id="credentialFile" 
+                  @change="handleFileUpload" 
+                  accept="image/*" 
+                  class="file-input-hidden" 
+                  ref="fileInputRef"
+                  :required="!credentialImageUrl"
+                />
+                <button 
+                  type="button" 
+                  class="btn btn-secondary upload-trigger" 
+                  @click="triggerFileInput"
+                  :disabled="loading || uploadLoading"
+                >
+                  <span class="spinner" v-if="uploadLoading"><i class="ph ph-spinner"></i></span>
+                  <i class="ph ph-upload-simple" v-else></i>
+                  {{ credentialImageUrl ? '重新选择并上传证件照' : '上传证件照片' }}
+                </button>
+                <div v-if="credentialImageUrl" class="image-preview-container">
+                  <img :src="getFullImageUrl(credentialImageUrl)" alt="证件预览" class="credential-preview" />
+                  <span class="upload-success-text"><i class="ph ph-check-circle"></i> 上传成功</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </transition>
+
+        <button type="submit" class="btn btn-primary submit-btn" :disabled="loading || uploadLoading">
           <span class="spinner" v-if="loading"><i class="ph ph-spinner"></i></span>
           <span v-else>立即注册</span>
         </button>
@@ -116,7 +229,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../utils/api'
 
@@ -129,31 +242,134 @@ const role = ref('student')
 const loading = ref(false)
 const errorMessage = ref('')
 const successMessage = ref('')
+const codeSuccessMessage = ref('')
+
+// Verification OTP state
+const verificationCode = ref('')
+const countdown = ref(0)
+const countdownTimer = ref(null)
+
+// Teacher registration state
+const realName = ref('')
+const schoolName = ref('')
+const credentialCode = ref('')
+const credentialImageUrl = ref('')
+const fileInputRef = ref(null)
+const uploadLoading = ref(false)
+
+onUnmounted(() => {
+  if (countdownTimer.value) {
+    clearInterval(countdownTimer.value)
+  }
+})
+
+const sendVerificationCode = async () => {
+  if (!email.value) {
+    errorMessage.value = '请先输入邮箱地址'
+    return
+  }
+  try {
+    loading.value = true
+    errorMessage.value = ''
+    await api.post('/users/send-verification-code', { email: email.value.trim() })
+    codeSuccessMessage.value = '验证码发送成功，开发环境已输出至后端控制台日志'
+    setTimeout(() => {
+      codeSuccessMessage.value = ''
+    }, 5000)
+    
+    // Start countdown
+    if (countdownTimer.value) {
+      clearInterval(countdownTimer.value)
+    }
+    countdown.value = 60
+    countdownTimer.value = setInterval(() => {
+      if (countdown.value > 1) {
+        countdown.value--
+      } else {
+        countdown.value = 0
+        clearInterval(countdownTimer.value)
+        countdownTimer.value = null
+      }
+    }, 1000)
+  } catch (error) {
+    errorMessage.value = error.message || '发送验证码失败，邮箱可能已被占用。'
+  } finally {
+    loading.value = false
+  }
+}
+
+const triggerFileInput = () => {
+  if (fileInputRef.value) {
+    fileInputRef.value.click()
+  }
+}
+
+const handleFileUpload = async (event) => {
+  const file = event.target.files[0]
+  if (!file) return
+
+  const formData = new FormData()
+  formData.append('file', file)
+
+  uploadLoading.value = true
+  errorMessage.value = ''
+  try {
+    const res = await api.post('/users/upload-credential', formData)
+    credentialImageUrl.value = res.credential_image_url
+  } catch (error) {
+    errorMessage.value = error.message || '证件上传失败，请确保文件是图片格式。'
+  } finally {
+    uploadLoading.value = false
+  }
+}
+
+const getFullImageUrl = (relativeUrl) => {
+  if (!relativeUrl) return ''
+  if (relativeUrl.startsWith('http')) return relativeUrl
+  const base = api.baseUrl.replace(/\/api\/v1\/?$/, '')
+  return `${base}${relativeUrl}`
+}
 
 const handleRegister = async () => {
   loading.value = true
   errorMessage.value = ''
   successMessage.value = ''
+  codeSuccessMessage.value = ''
   
   try {
     const signupData = {
-      username: username.value,
-      email: email.value,
+      username: username.value.trim(),
+      email: email.value.trim(),
       password: password.value,
-      role: role.value
+      role: role.value,
+      verification_code: verificationCode.value.trim()
+    }
+
+    if (role.value === 'teacher') {
+      if (!realName.value || !schoolName.value || !credentialCode.value || !credentialImageUrl.value) {
+        throw new Error('教师注册必须填写真实姓名、学校、证件号并上传证件照')
+      }
+      signupData.real_name = realName.value.trim()
+      signupData.school_name = schoolName.value.trim()
+      signupData.credential_code = credentialCode.value.trim()
+      signupData.credential_image_url = credentialImageUrl.value
     }
 
     // Call register endpoint
     await api.post('/users/register', signupData)
 
-    successMessage.value = '注册成功！正在引导您前往登录页...'
+    if (role.value === 'teacher') {
+      successMessage.value = '教师资质提交成功！账户暂时冻结，请联系管理员审批后再登录。正在跳转...'
+    } else {
+      successMessage.value = '注册成功！正在引导您前往登录页...'
+    }
     
-    // Auto redirect to login after 2 seconds
+    // Auto redirect to login after 3 seconds
     setTimeout(() => {
       router.push('/login')
-    }, 2000)
+    }, 3000)
   } catch (error) {
-    errorMessage.value = error.message || '注册失败，用户名或邮箱可能已被占用。'
+    errorMessage.value = error.message || '注册失败，验证码错误或用户名/邮箱已被占用。'
   } finally {
     loading.value = false
   }
@@ -349,7 +565,99 @@ const handleRegister = async () => {
 
 .slide-down-enter-from,
 .slide-down-leave-to {
-  transform: translateY(-8px);
+  transform: translateY(-10px);
   opacity: 0;
+}
+
+/* Email Verification Code Send Layout */
+.email-send-wrapper {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.email-send-wrapper .form-control {
+  flex-grow: 1;
+}
+
+.send-code-btn {
+  white-space: nowrap;
+  padding: 0 0.75rem;
+  font-size: 0.8rem;
+  flex-shrink: 0;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.send-code-btn:hover:not(:disabled) {
+  background-color: var(--border-color);
+}
+
+.send-code-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Teacher fields layout */
+.teacher-fields-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border-color);
+  margin-top: 0.5rem;
+}
+
+/* File Upload styling */
+.file-upload-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+.file-input-hidden {
+  display: none;
+}
+
+.upload-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.625rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.image-preview-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  background-color: var(--bg-hover);
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--border-color);
+}
+
+.credential-preview {
+  max-width: 100%;
+  max-height: 160px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+}
+
+.upload-success-text {
+  font-size: 0.75rem;
+  color: var(--color-success);
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: 600;
 }
 </style>

@@ -11,18 +11,6 @@
 
     <!-- Right: Notification Center & Info -->
     <div class="header-right">
-      <!-- Mock Switch Toggle Capsule -->
-      <button 
-        class="mock-toggle-btn" 
-        :class="appStore.useMock ? 'mock-active' : 'mock-inactive'"
-        @click="appStore.toggleMock"
-        :title="appStore.useMock ? '当前运行在本地 Mock 沙盒模拟环境，点击切换为真实后端接口联调。' : '当前已接入真实后端接口联调，点击切换回 Mock 本地沙盒。'"
-      >
-        <span class="pulse-dot" v-if="!appStore.useMock"></span>
-        <i :class="appStore.useMock ? 'ph ph-lightning' : 'ph ph-broadcast'"></i>
-        {{ appStore.useMock ? '模拟沙盒 (Mock)' : '联调后端 (Live)' }}
-      </button>
-
       <!-- Notification Dropdown Toggle -->
       <div class="notification-wrapper" v-click-outside="closeNotifications">
         <button class="notification-trigger" @click="toggleNotifications">
@@ -82,12 +70,10 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { useAppStore } from '../store/app'
 import { useAuthStore } from '../store/auth'
 import { api } from '../utils/api'
 
 const route = useRoute()
-const appStore = useAppStore()
 const authStore = useAuthStore()
 
 const showNotifications = ref(false)
@@ -141,10 +127,6 @@ const closeNotifications = () => {
 }
 
 const fetchNotifications = async () => {
-  if (appStore.useMock) {
-    return // Keep initial mock notifications in sandbox mode
-  }
-  
   if (!authStore.isAuthenticated) {
     notifications.value = []
     return
@@ -161,7 +143,7 @@ const fetchNotifications = async () => {
 const markAsRead = async (notif) => {
   if (!notif.is_read) {
     notif.is_read = true
-    if (!appStore.useMock && authStore.isAuthenticated) {
+    if (authStore.isAuthenticated) {
       try {
         await api.post(`/notifications/${notif.id}/read`)
       } catch (err) {
@@ -173,7 +155,7 @@ const markAsRead = async (notif) => {
 
 const markAllAsRead = async () => {
   notifications.value.forEach(n => n.is_read = true)
-  if (!appStore.useMock && authStore.isAuthenticated) {
+  if (authStore.isAuthenticated) {
     try {
       await api.post('/notifications/read-all')
     } catch (err) {
@@ -184,7 +166,7 @@ const markAllAsRead = async () => {
 
 const deleteNotification = async (id) => {
   notifications.value = notifications.value.filter(n => n.id !== id)
-  if (!appStore.useMock && authStore.isAuthenticated) {
+  if (authStore.isAuthenticated) {
     try {
       await api.delete(`/notifications/${id}`)
     } catch (err) {
@@ -209,33 +191,10 @@ onMounted(() => {
   
   // Poll notifications every 30s in live mode
   setInterval(() => {
-    if (!appStore.useMock && authStore.isAuthenticated) {
+    if (authStore.isAuthenticated) {
       fetchNotifications()
     }
   }, 30000)
-})
-
-watch(() => appStore.useMock, (newVal) => {
-  if (newVal) {
-    notifications.value = [
-      {
-        id: 1,
-        title: '系统欢迎信',
-        content: '欢迎进入智能教育平台。在这里，教师可上传教材进行 RAG 分析，学生可进行互动问答。',
-        is_read: false,
-        created_at: new Date(Date.now() - 3600000).toISOString()
-      },
-      {
-        id: 2,
-        title: '新功能上线',
-        content: 'AI 问答模块已支持流式输出，问答体验更加丝滑，欢迎体验。',
-        is_read: true,
-        created_at: new Date(Date.now() - 86400000).toISOString()
-      }
-    ]
-  } else {
-    fetchNotifications()
-  }
 })
 
 watch(() => authStore.token, () => {
@@ -251,7 +210,7 @@ const formattedTime = computed(() => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
 })
 
-// Simple custom click-outside directive simulation helper
+// 简单的自定义 click-outside 指令模拟助手
 const vClickOutside = {
   mounted(el, binding) {
     el.clickOutsideEvent = function(event) {

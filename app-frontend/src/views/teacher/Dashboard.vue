@@ -22,6 +22,9 @@
     <!-- Classes Grid Area -->
     <div class="class-grid" v-if="classes.length > 0">
       <div v-for="cls in classes" :key="cls.id" class="class-card card animate-card">
+        <div v-if="cls.pending_count > 0" class="pending-badge" :title="`有 ${cls.pending_count} 个学生入班申请待审批`">
+          {{ cls.pending_count }}
+        </div>
         <div class="card-top">
           <div class="class-icon"><i class="ph ph-chalkboard"></i></div>
           <div class="title-details">
@@ -161,31 +164,6 @@ const modalLoading = ref(false)
 const activeCopyCode = ref(null)
 const globalMessage = ref(null)
 
-// Default Mock Data for local workspace demonstration
-const mockClasses = [
-  {
-    id: 1,
-    name: '高等数学 A 班',
-    class_code: 'AB12CD',
-    textbooks: [
-      { id: 3, title: '高等数学上册', status: 'success' }
-    ],
-    students: [
-      { student_id: 10, username: 'lisi' },
-      { student_id: 11, username: 'wangwu' }
-    ]
-  },
-  {
-    id: 2,
-    name: '线性代数 B 班',
-    class_code: 'XY99ZZ',
-    textbooks: [],
-    students: [
-      { student_id: 12, username: 'zhaoliu' }
-    ]
-  }
-]
-
 // Alert styles
 const alertClass = computed(() => {
   if (!globalMessage.value) return ''
@@ -198,8 +176,8 @@ const fetchClasses = async () => {
     const res = await api.get('/classes/dashboard')
     classes.value = res.classes || []
   } catch (error) {
-    console.warn('Backend API connection offline, falling back to mock classes dashboard.')
-    classes.value = [...mockClasses]
+    showErrorToast(error.message || '获取班级看板数据失败。')
+    classes.value = []
   }
 }
 
@@ -242,23 +220,13 @@ const handleCreateClass = async () => {
     classes.value.push({
       ...response,
       textbooks: [],
-      students: []
+      students: [],
+      pending_count: 0
     })
     closeCreateModal()
     showSuccessToast(`班级 “${response.name}” 创建成功，班级邀请码为: ${response.class_code}。`)
   } catch (error) {
-    // Sandbox mock bypass
-    const generatedCode = Math.random().toString(36).substring(2, 8).toUpperCase()
-    const mockNewClass = {
-      id: classes.value.length + 1,
-      name: newClassName.value.trim(),
-      class_code: generatedCode,
-      textbooks: [],
-      students: []
-    }
-    classes.value.push(mockNewClass)
-    closeCreateModal()
-    showSuccessToast(`班级 “${mockNewClass.name}” 创建成功（模拟沙盒拦截，生成邀请码为: ${generatedCode}）！`)
+    showErrorToast(error.message || '创建班级失败。')
   } finally {
     modalLoading.value = false
   }
@@ -284,9 +252,7 @@ const handleDisbandClass = async () => {
     classes.value = classes.value.filter(c => c.id !== id)
     showSuccessToast('班级已成功解散。')
   } catch (error) {
-    // Sandbox deletion
-    classes.value = classes.value.filter(c => c.id !== id)
-    showSuccessToast('班级已解散作废（模拟沙盒拦截模式）。')
+    showErrorToast(error.message || '解散班级失败。')
   } finally {
     closeConfirmDisband()
   }
@@ -295,6 +261,13 @@ const handleDisbandClass = async () => {
 // Toast alerts helper
 const showSuccessToast = (text) => {
   globalMessage.value = { type: 'success', text }
+  setTimeout(() => {
+    globalMessage.value = null
+  }, 5000)
+}
+
+const showErrorToast = (text) => {
+  globalMessage.value = { type: 'error', text }
   setTimeout(() => {
     globalMessage.value = null
   }, 5000)
@@ -787,5 +760,26 @@ const showSuccessToast = (text) => {
 .slide-down-enter-from, .slide-down-leave-to {
   transform: translateY(-10px);
   opacity: 0;
+}
+
+/* Red dot badge for pending student applications */
+.pending-badge {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  background-color: var(--color-danger);
+  color: white;
+  font-size: 0.7rem;
+  font-weight: 700;
+  height: 18px;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.3);
+  z-index: 2;
+  border: 1px solid rgba(255, 255, 255, 0.2);
 }
 </style>

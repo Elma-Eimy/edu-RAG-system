@@ -59,27 +59,6 @@
       <div class="card-footer">
         <p>还没有账号？ <router-link to="/register" class="link">立即创建账户</router-link></p>
       </div>
-
-      <!-- Quick Simulation Drawer (Collapsible) -->
-      <div class="simulation-drawer" :class="{ open: showSimulation }">
-        <button class="simulation-toggle" @click="showSimulation = !showSimulation">
-          {{ showSimulation ? '隐藏快捷演示通道' : '⚡ 展开快捷演示通道 (无需配置后端)' }}
-        </button>
-        <div class="simulation-content" v-if="showSimulation">
-          <p class="drawer-desc">点击下方按钮可直接写入 Mock 角色数据并体验系统完整交互：</p>
-          <div class="sim-buttons">
-            <button class="btn btn-secondary sim-btn sim-student" @click="simulateLogin('student')">
-              🏫 学生端演示
-            </button>
-            <button class="btn btn-secondary sim-btn sim-teacher" @click="simulateLogin('teacher')">
-              📚 教师端演示
-            </button>
-            <button class="btn btn-secondary sim-btn sim-admin" @click="simulateLogin('admin')">
-              🛡️ 管理员演示
-            </button>
-          </div>
-        </div>
-      </div>
     </div>
   </div>
 </template>
@@ -97,7 +76,6 @@ const username = ref('')
 const password = ref('')
 const loading = ref(false)
 const errorMessage = ref('')
-const showSimulation = ref(false)
 
 // Real Authentication Call (OAuth2 Form Formatted)
 const handleLogin = async () => {
@@ -130,19 +108,6 @@ const handleLogin = async () => {
   } finally {
     loading.value = false
   }
-}
-
-// Simulated bypass for quick demonstration without backend setup
-const simulateLogin = (role) => {
-  authStore.setToken('mock-jwt-bypass-token')
-  authStore.setUser({
-    id: 99,
-    username: `demo_${role}`,
-    email: `${role}_demo@smartedu.edu`,
-    role: role,
-    status: 'active'
-  })
-  redirectUser(role)
 }
 
 const redirectUser = (role) => {

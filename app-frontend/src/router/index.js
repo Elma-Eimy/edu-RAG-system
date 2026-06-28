@@ -85,13 +85,13 @@ const router = createRouter({
   routes
 })
 
-  // Route guard to enforce role-based access control
+  // 路由守卫：强制执行基于角色的访问控制
 router.beforeEach((to, from, next) => {
   const authStore = useAuthStore()
   const isAuthenticated = authStore.isAuthenticated
   const userRole = authStore.user?.role
 
-  // Sanity check: if authenticated but user role is corrupt/missing, force logout to prevent redirect loops
+  // 健壮性检查：若已登录但用户角色损坏或缺失，则强制登出以防止无限重定向循环
   if (isAuthenticated && !userRole) {
     authStore.logout()
     next('/login')
@@ -99,16 +99,16 @@ router.beforeEach((to, from, next) => {
   }
 
   if (to.meta.requiresAuth && !isAuthenticated) {
-    // Not authenticated, redirect to login
+    // 未登录，重定向到登录页
     next('/login')
   } else if (to.meta.guestOnly && isAuthenticated) {
-    // Authenticated, redirect to respective dashboard
+    // 已登录，重定向到对应的仪表板
     if (userRole === 'student') next('/student')
     else if (userRole === 'teacher') next('/teacher')
     else if (userRole === 'admin') next('/admin')
     else next('/login')
   } else if (to.meta.role && to.meta.role !== userRole) {
-    // Role mismatch, redirect to respective dashboard or login
+    // 角色不匹配，重定向到其有权限的仪表板或登录页
     if (userRole === 'student') next('/student')
     else if (userRole === 'teacher') next('/teacher')
     else if (userRole === 'admin') next('/admin')
