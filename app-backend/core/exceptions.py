@@ -13,10 +13,12 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
         content={"code": exc.status_code, "msg": exc.detail, "data": None},
     )
 
+from fastapi.encoders import jsonable_encoder
+
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(
         status_code=422,
-        content={"code": 422, "msg": "Validation Error", "data": exc.errors()},
+        content={"code": 422, "msg": "Validation Error", "data": jsonable_encoder(exc.errors())},
     )
 
 async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
