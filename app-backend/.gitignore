@@ -5,3 +5,6 @@ pycache/
 __pycache__/
 chroma_db/
 logs/
+assets/
+uploads/
+*.log
