@@ -44,6 +44,7 @@ class TextbookBriefResponse(BaseModel):
     file_path: str
     created_at: str
     boundClasses: List[int] = []
+    className: str | None = None
 
     class Config:
         from_attributes = True
@@ -100,7 +101,6 @@ async def _get_owned_textbook(
 async def upload_textbook(
     title: str = Form(..., description="教材名称"),
     file: UploadFile = File(..., description="PDF 文件"),
-    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_teacher),
 ):
     """
@@ -148,15 +148,17 @@ async def upload_textbook(
 
 
     # ── 写入数据库（status=PENDING）────────────────────────────────────────────
-    textbook = await crud_textbook.create(
-        db,
-        obj_in={
-            "title": title,
-            "file_path": relative_path,
-            "status": TextbookStatus.PENDING,
-            "teacher_id": current_user.id,
-        }
-    )
+    from db.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        textbook = await crud_textbook.create(
+            db,
+            obj_in={
+                "title": title,
+                "file_path": relative_path,
+                "status": TextbookStatus.PENDING,
+                "teacher_id": current_user.id,
+            }
+        )
     
     # ── 失效教材列表缓存 ────────────────────────────────────────────────────────
     try:
@@ -170,7 +172,8 @@ async def upload_textbook(
     absolute_path = storage.get_absolute_path(relative_path)
     try:
         from worker.tasks import process_textbook_task
-        process_textbook_task.delay(textbook.id, absolute_path)
+        from worker.celery_app import enqueue_task
+        enqueue_task(process_textbook_task, textbook.id, absolute_path)
         logger.info("Queued process_textbook_task for textbook_id=%d", textbook.id)
     except Exception as exc:
         # Celery 不可达时不影响 HTTP 响应，但记录警告（可后续手动重触发）
@@ -261,19 +264,50 @@ async def list_textbooks(
         result = await db.execute(query)
         textbooks = list(result.scalars().all())
 
-    response_list = [
-        TextbookBriefResponse(
-            id=t.id,
-            title=t.title,
-            status=t.status,
-            processing_progress=t.processing_progress,
-            chroma_collection_id=t.chroma_collection_id,
-            file_path=t.file_path,
-            created_at=t.created_at.isoformat(),
-            boundClasses=[link.class_id for link in t.class_links if link.deleted_at is None],
+    # 查询关联班级名称以填充 className
+    class_name_map = {}
+    if textbooks:
+        if current_user.role == UserRole.STUDENT:
+            class_query = select(StudentClass.class_id, CourseClass.name).join(
+                CourseClass, CourseClass.id == StudentClass.class_id
+            ).where(
+                StudentClass.student_id == current_user.id,
+                StudentClass.status == StudentClassStatus.APPROVED,
+                StudentClass.deleted_at.is_(None),
+                CourseClass.deleted_at.is_(None)
+            )
+            class_result = await db.execute(class_query)
+            class_name_map = {row[0]: row[1] for row in class_result.all()}
+        else:
+            class_query = select(CourseClass.id, CourseClass.name).where(
+                CourseClass.teacher_id == current_user.id,
+                CourseClass.deleted_at.is_(None)
+            )
+            class_result = await db.execute(class_query)
+            class_name_map = {row[0]: row[1] for row in class_result.all()}
+
+    response_list = []
+    for t in textbooks:
+        class_names = [
+            class_name_map[link.class_id]
+            for link in t.class_links
+            if link.deleted_at is None and link.class_id in class_name_map
+        ]
+        class_name_str = ", ".join(class_names) if class_names else None
+        
+        response_list.append(
+            TextbookBriefResponse(
+                id=t.id,
+                title=t.title,
+                status=t.status,
+                processing_progress=t.processing_progress,
+                chroma_collection_id=t.chroma_collection_id,
+                file_path=t.file_path,
+                created_at=t.created_at.isoformat(),
+                boundClasses=[link.class_id for link in t.class_links if link.deleted_at is None],
+                className=class_name_str,
+            )
         )
-        for t in textbooks
-    ]
 
     # ── 3. 将结果写入 Redis 缓存（有效期 10 分钟） ─────────────────────────────
     try:
@@ -494,7 +528,8 @@ async def reprocess_textbook(
     # ── 投递 Celery 任务 ───────────────────────────────────────────────────────
     try:
         from worker.tasks import process_textbook_task
-        process_textbook_task.delay(textbook.id, absolute_path)
+        from worker.celery_app import enqueue_task
+        enqueue_task(process_textbook_task, textbook.id, absolute_path)
         logger.info("Re-queued process_textbook_task for textbook_id=%d", textbook.id)
     except Exception as exc:
         logger.error("Failed to re-enqueue task for textbook %d: %s", textbook.id, exc)

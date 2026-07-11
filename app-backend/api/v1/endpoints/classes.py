@@ -491,6 +491,15 @@ async def review_applications(
         except Exception as e:
             logger.error("Failed to send review applications notifications: %s", e)
 
+        # ── 新增：如果审核通过，则失效对应学生的教材列表缓存，防止学生端显示为空 ──────
+        if new_status == StudentClassStatus.APPROVED:
+            try:
+                from core.redis import redis_client
+                for sid in student_ids:
+                    await redis_client.delete(f"cache:textbooks:list:student:{sid}")
+            except Exception as e:
+                logger.warning("Failed to invalidate student cache on approval: %s", e)
+
     # ── 失效看板缓存 ──────────────────────────────────────────────────────────
     try:
         from core.redis import redis_client
@@ -592,6 +601,13 @@ async def remove_student_from_class(
         await crud_student_class.remove(db, id=student_class_record.id)
         action_desc = "已成功将学生移除该班级"
 
+        # ── 新增：失效被移除学生的教材列表缓存 ──────────────────────────────
+        try:
+            from core.redis import redis_client
+            await redis_client.delete(f"cache:textbooks:list:student:{student_id}")
+        except Exception as e:
+            logger.warning("Failed to invalidate student cache on removal: %s", e)
+
     # ── 失效看板缓存 ──────────────────────────────────────────────────────────
     try:
         from core.redis import redis_client
@@ -691,6 +707,15 @@ async def disband_class(
     # 4. 软删除班级主记录
     await crud_class.remove(db, id=course_class.id)
     
+    # ── 新增：失效所有受影响学生的教材列表缓存 ─────────────────────────────
+    if student_ids:
+        try:
+            from core.redis import redis_client
+            for sid in student_ids:
+                await redis_client.delete(f"cache:textbooks:list:student:{sid}")
+        except Exception as e:
+            logger.warning("Failed to invalidate student caches in disband_class: %s", e)
+
     # ── 失效看板缓存 ──────────────────────────────────────────────────────────
     try:
         from core.redis import redis_client
@@ -784,6 +809,13 @@ async def quit_class(
                 )
 
     await crud_student_class.remove(db, id=student_class_record.id)
+
+    # ── 新增：失效主动退出班级学生的教材列表缓存 ───────────────────────────
+    try:
+        from core.redis import redis_client
+        await redis_client.delete(f"cache:textbooks:list:student:{current_user.id}")
+    except Exception as e:
+        logger.warning("Failed to invalidate student cache on quit: %s", e)
     
     # ── 失效看板缓存 ──────────────────────────────────────────────────────────
     if teacher_id:

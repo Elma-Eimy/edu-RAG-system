@@ -454,7 +454,8 @@ async def stream_chat(
             if settings.ENABLE_HISTORY_SUMMARY:
                 try:
                     from worker.tasks import summarize_chat_session_task
-                    summarize_chat_session_task.delay(session_id)
+                    from worker.celery_app import enqueue_task
+                    enqueue_task(summarize_chat_session_task, session_id)
                 except Exception as e:
                     logger.error("Failed to enqueue summarize_chat_session_task: %s", e)
 
@@ -479,7 +480,8 @@ async def stream_chat(
                     # 即使异常中断，如果开启了摘要，也重新提炼
                     if settings.ENABLE_HISTORY_SUMMARY:
                         from worker.tasks import summarize_chat_session_task
-                        summarize_chat_session_task.delay(session_id)
+                        from worker.celery_app import enqueue_task
+                        enqueue_task(summarize_chat_session_task, session_id)
                 except Exception as save_err:
                     logger.error("Failed to save partial AI reply: %s", save_err)
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
@@ -500,7 +502,8 @@ async def stream_chat(
                     # 连接断开保存残余回复后，重新提炼摘要
                     if settings.ENABLE_HISTORY_SUMMARY:
                         from worker.tasks import summarize_chat_session_task
-                        summarize_chat_session_task.delay(session_id)
+                        from worker.celery_app import enqueue_task
+                        enqueue_task(summarize_chat_session_task, session_id)
                 except Exception as final_err:
                     logger.error("Failed to save partial AI reply in finally block: %s", final_err)
 
@@ -744,7 +747,8 @@ async def summarize_student_chat(
     # 强制触发摘要 Celery 任务，force=True 会跳过消息长度限制
     try:
         from worker.tasks import summarize_chat_session_task
-        summarize_chat_session_task.delay(session_id, force=True)
+        from worker.celery_app import enqueue_task
+        enqueue_task(summarize_chat_session_task, session_id, force=True)
     except Exception as e:
         logger.error("Failed to enqueue force summarize_chat_session_task: %s", e)
         raise HTTPException(
