@@ -25,18 +25,18 @@ class RAGService:
     教材检索增强服务。
     使用持久化本地 ChromaDB（PersistentClient），与 Celery 异步解析任务进程共享相同的磁盘数据库文件目录。
     """
+    _chroma_client: chromadb.ClientAPI | None = None
 
     def __init__(self):
-        self._chroma_client: chromadb.ClientAPI | None = None
         self._ai_service = AIService()
 
     # ------------------------------------------------------------------
     # 内部方法：懒加载初始化 ChromaDB 客户端（运行期全局仅初始化一次）
     # ------------------------------------------------------------------
     def _get_client(self) -> chromadb.ClientAPI:
-        if self._chroma_client is None:
-            self._chroma_client = chromadb.PersistentClient(path=settings.CHROMADB_PATH)
-        return self._chroma_client
+        if RAGService._chroma_client is None:
+            RAGService._chroma_client = chromadb.PersistentClient(path=settings.CHROMADB_PATH)
+        return RAGService._chroma_client
 
     def _get_collection(self, textbook_id: int) -> Collection | None:
         """
