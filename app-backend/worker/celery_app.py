@@ -20,3 +20,29 @@ celery_app.conf.update(
 
 # 自动发现 worker 模块中的任务
 celery_app.autodiscover_tasks(["worker.tasks"])
+
+def enqueue_task(task, *args, **kwargs):
+    """
+    智能任务排队分发器。
+    如果 task_always_eager 为 True（本地同步调试开发模式），则通过线程池异步执行任务（task.apply），
+    从而防止阻塞 FastAPI 的 ASGI 主事件循环（Event Loop），解决上传教材和提炼摘要时前端卡死的问题。
+    否则，使用标准的 Celery 消息队列后台异步分发（task.delay）。
+    """
+    if celery_app.conf.task_always_eager:
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        
+        if not hasattr(enqueue_task, "_executor"):
+            enqueue_task._executor = ThreadPoolExecutor(max_workers=4)
+            
+        try:
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(
+                enqueue_task._executor, 
+                lambda: task.apply(args=args, kwargs=kwargs)
+            )
+        except RuntimeError:
+            # 处在非 asyncio 事件循环环境中（如独立测试或命令行），回退为同步串行执行
+            task.apply(args=args, kwargs=kwargs)
+    else:
+        task.delay(*args, **kwargs)
