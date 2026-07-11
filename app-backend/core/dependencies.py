@@ -11,8 +11,9 @@ from db.models.user import User, UserRole, UserStatus
 # 指向真实的登录获取 Token 接口地址，用于 Swagger 授权调试
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/users/login/access-token")
 
+from db.database import AsyncSessionLocal
+
 async def get_current_user(
-    db: AsyncSession = Depends(get_db),
     token: str = Depends(oauth2_scheme)
 ) -> User:
     """
@@ -52,9 +53,10 @@ async def get_current_user(
     except (JWTError, ValueError):
         raise credentials_exception
         
-    query = select(User).where(User.id == user_id_int, User.deleted_at.is_(None))
-    result = await db.execute(query)
-    user = result.scalars().first()
+    async with AsyncSessionLocal() as db:
+        query = select(User).where(User.id == user_id_int, User.deleted_at.is_(None))
+        result = await db.execute(query)
+        user = result.scalars().first()
     
     if user is None:
         raise credentials_exception
